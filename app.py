@@ -16,7 +16,7 @@ from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from PIL import Image, ImageDraw, ImageFont
 
 
-APP_TITLE = "相続関係説明図ジェネレーター Ver2.1"
+APP_TITLE = "相続関係説明図ジェネレーター Ver2.2"
 DB_PATH = "souzoku_cases.db"
 BG = "#FFF4CF"
 LINE = "#222222"
@@ -32,9 +32,13 @@ st.set_page_config(
 )
 
 
+# =============================
+# DB
+# =============================
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS cases (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,9 +49,17 @@ def init_db():
             spouse TEXT,
             parents TEXT,
             children TEXT,
-            siblings TEXT
+            siblings TEXT,
+            creator TEXT
         )
     """)
+
+    # 既存DBに creator 列がない場合の追加
+    cur.execute("PRAGMA table_info(cases)")
+    cols = [r[1] for r in cur.fetchall()]
+    if "creator" not in cols:
+        cur.execute("ALTER TABLE cases ADD COLUMN creator TEXT")
+
     conn.commit()
     conn.close()
 
@@ -76,16 +88,25 @@ def json_to_series_dict(text):
         return {}
 
 
+# =============================
+# session_state
+# =============================
 def init_session():
     if "decedent" not in st.session_state:
         st.session_state.decedent = {
             "氏名": "",
-            "死亡日": "",
             "生年月日": "",
+            "死亡日": "",
+            "最後の本籍": "",
             "最後の住所": "",
-            "本籍": "",
             "備考": "",
         }
+
+    # 古いキー互換
+    if "本籍" in st.session_state.decedent and "最後の本籍" not in st.session_state.decedent:
+        st.session_state.decedent["最後の本籍"] = st.session_state.decedent.get("本籍", "")
+    if "最後の住所" not in st.session_state.decedent:
+        st.session_state.decedent["最後の住所"] = ""
 
     if "spouse" not in st.session_state:
         st.session_state.spouse = {
@@ -93,35 +114,63 @@ def init_session():
             "状態": "ご存命",
             "生年月日": "",
             "死亡日": "",
-            "相続分": "",
+            "最後の本籍": "",
             "住所": "",
+            "相続状況": "相続",
+            "相続分": "",
             "備考": "",
         }
 
-    person_cols = ["続柄", "氏名", "状態", "生年月日", "死亡日", "相続分", "住所", "備考"]
+    for k in ["最後の本籍", "住所", "相続状況", "相続分", "備考"]:
+        if k not in st.session_state.spouse:
+            st.session_state.spouse[k] = ""
+
+    person_cols = ["続柄", "氏名", "状態", "生年月日", "死亡日", "最後の本籍", "住所", "相続状況", "相続分", "備考"]
 
     if "parents_df" not in st.session_state:
         st.session_state.parents_df = pd.DataFrame([
-            {"続柄": "父", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "相続分": "", "住所": "", "備考": ""},
-            {"続柄": "母", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "相続分": "", "住所": "", "備考": ""},
+            {"続柄": "父", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "最後の本籍": "", "住所": "", "相続状況": "", "相続分": "", "備考": ""},
+            {"続柄": "母", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "最後の本籍": "", "住所": "", "相続状況": "", "相続分": "", "備考": ""},
         ], columns=person_cols)
+    else:
+        st.session_state.parents_df = normalize_people_df(st.session_state.parents_df, person_cols)
 
     if "children_df" not in st.session_state:
         st.session_state.children_df = pd.DataFrame([
-            {"続柄": "長男", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "相続分": "", "住所": "", "備考": ""},
-            {"続柄": "長女", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "相続分": "", "住所": "", "備考": ""},
-            {"続柄": "二男", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "相続分": "", "住所": "", "備考": ""},
+            {"続柄": "長男", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "最後の本籍": "", "住所": "", "相続状況": "相続", "相続分": "", "備考": ""},
+            {"続柄": "長女", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "最後の本籍": "", "住所": "", "相続状況": "相続", "相続分": "", "備考": ""},
+            {"続柄": "二男", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "最後の本籍": "", "住所": "", "相続状況": "相続", "相続分": "", "備考": ""},
         ], columns=person_cols)
+    else:
+        st.session_state.children_df = normalize_people_df(st.session_state.children_df, person_cols)
 
     if "siblings_df" not in st.session_state:
         st.session_state.siblings_df = pd.DataFrame([
-            {"続柄": "兄", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "相続分": "", "住所": "", "備考": ""},
-            {"続柄": "姉", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "相続分": "", "住所": "", "備考": ""},
-            {"続柄": "弟", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "相続分": "", "住所": "", "備考": ""},
+            {"続柄": "兄", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "最後の本籍": "", "住所": "", "相続状況": "", "相続分": "", "備考": ""},
+            {"続柄": "姉", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "最後の本籍": "", "住所": "", "相続状況": "", "相続分": "", "備考": ""},
+            {"続柄": "弟", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "最後の本籍": "", "住所": "", "相続状況": "", "相続分": "", "備考": ""},
         ], columns=person_cols)
+    else:
+        st.session_state.siblings_df = normalize_people_df(st.session_state.siblings_df, person_cols)
+
+    if "creator" not in st.session_state:
+        st.session_state.creator = {
+            "作成日": datetime.now().strftime("%Y-%m-%d"),
+            "作成者氏名": "",
+            "作成者住所": "",
+        }
 
     if "case_name" not in st.session_state:
         st.session_state.case_name = "新規案件"
+
+
+def normalize_people_df(df, columns):
+    df = df.copy().fillna("")
+    # 旧版の住所・相続分のみのデータにも対応
+    for c in columns:
+        if c not in df.columns:
+            df[c] = ""
+    return df[columns]
 
 
 init_db()
@@ -145,13 +194,7 @@ def text_value(v):
     return str(v).strip()
 
 
-def calc_font_size(text, base=24, min_size=13, max_chars=7):
-    """
-    氏名が長い場合に自動で文字サイズを下げる。
-    例：佐藤二郎 → 24
-        佐藤二郎三郎 → 19
-        とても長い氏名 → 13
-    """
+def calc_font_size(text, base=24, min_size=12, max_chars=7):
     t = text_value(text)
     if not t:
         return base
@@ -161,10 +204,19 @@ def calc_font_size(text, base=24, min_size=13, max_chars=7):
     return max(min_size, base - (length - max_chars) * 2)
 
 
+def split_text_lines(text, max_chars=16, max_lines=2):
+    text = text_value(text)
+    if not text:
+        return []
+    lines = []
+    for i in range(0, len(text), max_chars):
+        lines.append(text[i:i + max_chars])
+        if len(lines) >= max_lines:
+            break
+    return lines
+
+
 def split_name_lines(name, max_chars=8):
-    """
-    氏名が長い場合は2行に分ける。
-    """
     name = text_value(name)
     if len(name) <= max_chars:
         return [name] if name else [""]
@@ -175,8 +227,28 @@ def make_status_line(status, death):
     status = text_value(status)
     death = text_value(death)
     if death:
-        return f"□{status}　{death}没"
-    return f"□{status}　年頃没"
+        return f"□{status}　死亡日：{death}"
+    return f"□{status}"
+
+
+def person_to_box(row, title, box_id, x, y, w=390, h=205, fill=BG, title_color="#D58A00"):
+    return {
+        "id": box_id,
+        "title": title,
+        "name": row.get("氏名", ""),
+        "relation": row.get("続柄", ""),
+        "status": row.get("状態", ""),
+        "birth": row.get("生年月日", ""),
+        "death": row.get("死亡日", ""),
+        "honseki": row.get("最後の本籍", ""),
+        "address": row.get("住所", ""),
+        "inheritance_status": row.get("相続状況", ""),
+        "share": row.get("相続分", ""),
+        "note": row.get("備考", ""),
+        "x": x, "y": y, "w": w, "h": h,
+        "fill": fill,
+        "title_color": title_color,
+    }
 
 
 # =============================
@@ -190,96 +262,95 @@ def make_layout():
     boxes = []
     lines = []
 
-    W, H = 1600, 1050
+    W, H = 1800, 1250
 
-    boxes.append({
-        "id": "decedent",
-        "group": "center",
-        "title": "被相続人（亡くなった方）",
-        "name": st.session_state.decedent.get("氏名", ""),
-        "status": "死亡",
-        "birth": st.session_state.decedent.get("生年月日", ""),
-        "death": st.session_state.decedent.get("死亡日", ""),
-        "share": "",
-        "x": 640, "y": 330, "w": 320, "h": 145,
-        "fill": "#FFFFFF",
-        "title_color": "#111111",
-    })
+    decedent_row = {
+        "氏名": st.session_state.decedent.get("氏名", ""),
+        "続柄": "被相続人",
+        "状態": "死亡",
+        "生年月日": st.session_state.decedent.get("生年月日", ""),
+        "死亡日": st.session_state.decedent.get("死亡日", ""),
+        "最後の本籍": st.session_state.decedent.get("最後の本籍", ""),
+        "住所": st.session_state.decedent.get("最後の住所", ""),
+        "相続状況": "",
+        "相続分": "",
+        "備考": st.session_state.decedent.get("備考", ""),
+    }
+
+    boxes.append(person_to_box(
+        decedent_row,
+        "被相続人（亡くなった方）",
+        "decedent",
+        710, 390,
+        w=390, h=220,
+        fill="#FFFFFF",
+        title_color="#111111"
+    ))
 
     spouse = st.session_state.spouse
     if any(text_value(spouse.get(k, "")) for k in spouse):
-        boxes.append({
-            "id": "spouse",
-            "group": "spouse",
-            "title": "必ず相続人　配偶者",
-            "name": spouse.get("氏名", ""),
-            "status": spouse.get("状態", ""),
-            "birth": spouse.get("生年月日", ""),
-            "death": spouse.get("死亡日", ""),
-            "share": spouse.get("相続分", ""),
-            "x": 640, "y": 90, "w": 360, "h": 155,
-            "fill": BG,
-            "title_color": "#C98300",
-        })
-        lines.append(("spouse", "decedent", "vertical"))
+        spouse_row = {
+            "氏名": spouse.get("氏名", ""),
+            "続柄": "配偶者",
+            "状態": spouse.get("状態", ""),
+            "生年月日": spouse.get("生年月日", ""),
+            "死亡日": spouse.get("死亡日", ""),
+            "最後の本籍": spouse.get("最後の本籍", ""),
+            "住所": spouse.get("住所", ""),
+            "相続状況": spouse.get("相続状況", ""),
+            "相続分": spouse.get("相続分", ""),
+            "備考": spouse.get("備考", ""),
+        }
+        boxes.append(person_to_box(
+            spouse_row,
+            "必ず相続人　配偶者",
+            "spouse",
+            710, 100,
+            w=420, h=220,
+            fill=BG,
+            title_color="#C98300"
+        ))
+        lines.append(("spouse", "decedent", "double"))
 
     # 父母
-    px, py = 70, 220
+    px, py = 65, 265
     for i, row in parents.iterrows():
-        boxes.append({
-            "id": f"parent_{i}",
-            "group": "parents",
-            "title": f"第二順位　被相続人等の{row.get('続柄','')}",
-            "name": row.get("氏名", ""),
-            "status": row.get("状態", ""),
-            "birth": row.get("生年月日", ""),
-            "death": row.get("死亡日", ""),
-            "share": row.get("相続分", ""),
-            "x": px, "y": py + i * 200, "w": 360, "h": 155,
-            "fill": BG,
-            "title_color": "#D58A00",
-        })
-        lines.append((f"parent_{i}", "decedent", "horizontal"))
+        boxes.append(person_to_box(
+            row,
+            f"第二順位　被相続人等の{row.get('続柄','')}",
+            f"parent_{i}",
+            px, py + i * 270,
+            w=450, h=220
+        ))
+        lines.append((f"parent_{i}", "decedent", "single"))
 
     # 子
     child_count = max(len(children), 1)
-    start_y = 105
-    gap = min(220, max(160, int((H - 180) / max(child_count, 1))))
-    cx = 1130
+    start_y = 115
+    gap = min(260, max(215, int((H - 210) / max(child_count, 1))))
+    cx = 1280
     for i, row in children.iterrows():
-        boxes.append({
-            "id": f"child_{i}",
-            "group": "children",
-            "title": "第一順位　被相続人等の子",
-            "name": row.get("氏名", ""),
-            "status": row.get("状態", ""),
-            "birth": row.get("生年月日", ""),
-            "death": row.get("死亡日", ""),
-            "share": row.get("相続分", ""),
-            "x": cx, "y": start_y + i * gap, "w": 390, "h": 155,
-            "fill": BG,
-            "title_color": "#D58A00",
-        })
-        lines.append(("decedent", f"child_{i}", "horizontal"))
+        boxes.append(person_to_box(
+            row,
+            "第一順位　被相続人等の子",
+            f"child_{i}",
+            cx, start_y + i * gap,
+            w=450, h=220
+        ))
+        lines.append(("decedent", f"child_{i}", "single"))
 
     # 兄弟姉妹
-    sx, sy = 640, 560
-    sgap = 190
+    sx, sy = 710, 700
+    sgap = 245
     for i, row in siblings.iterrows():
-        boxes.append({
-            "id": f"sibling_{i}",
-            "group": "siblings",
-            "title": f"第三順位　被相続人等の{row.get('続柄','兄弟姉妹')}",
-            "name": row.get("氏名", ""),
-            "status": row.get("状態", ""),
-            "birth": row.get("生年月日", ""),
-            "death": row.get("死亡日", ""),
-            "share": row.get("相続分", ""),
-            "x": sx, "y": sy + i * sgap, "w": 360, "h": 155,
-            "fill": BG,
-            "title_color": "#D58A00",
-        })
-        lines.append(("decedent", f"sibling_{i}", "vertical"))
+        boxes.append(person_to_box(
+            row,
+            f"第三順位　被相続人等の{row.get('続柄','兄弟姉妹')}",
+            f"sibling_{i}",
+            sx, sy + i * sgap,
+            w=420, h=220
+        ))
+        lines.append(("decedent", f"sibling_{i}", "single"))
 
     return W, H, boxes, lines
 
@@ -297,17 +368,22 @@ def render_svg():
 
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">']
     parts.append('<rect width="100%" height="100%" fill="white"/>')
-    parts.append('<rect x="35" y="20" width="300" height="55" fill="none" stroke="black" stroke-width="4"/>')
-    parts.append('<text x="48" y="58" font-size="32" font-weight="700" font-family="sans-serif">相続関係説明図</text>')
+    parts.append('<rect x="35" y="20" width="340" height="60" fill="none" stroke="black" stroke-width="4"/>')
+    parts.append('<text x="48" y="61" font-size="34" font-weight="700" font-family="sans-serif">相続関係説明図</text>')
 
-    # 線
-    for a, b, _kind in lines:
+    # 線：配偶者は二重線、その他は一本線
+    for a, b, kind in lines:
         if a not in by_id or b not in by_id:
             continue
         A, B = by_id[a], by_id[b]
         x1, y1 = A["x"] + A["w"] / 2, A["y"] + A["h"] / 2
         x2, y2 = B["x"] + B["w"] / 2, B["y"] + B["h"] / 2
-        parts.append(f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{LINE}" stroke-width="3"/>')
+
+        if kind == "double":
+            parts.append(f'<line x1="{x1-5}" y1="{y1}" x2="{x2-5}" y2="{y2}" stroke="{LINE}" stroke-width="3"/>')
+            parts.append(f'<line x1="{x1+5}" y1="{y1}" x2="{x2+5}" y2="{y2}" stroke="{LINE}" stroke-width="3"/>')
+        else:
+            parts.append(f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{LINE}" stroke-width="3"/>')
 
     for b in boxes:
         x, y, w, h = b["x"], b["y"], b["w"], b["h"]
@@ -318,7 +394,6 @@ def render_svg():
         parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="{b["fill"]}" stroke="{LINE}" stroke-width="3"/>')
         parts.append(f'<text x="{x+16}" y="{y+34}" font-size="23" fill="{b["title_color"]}" font-weight="700" font-family="sans-serif">{svg_escape(b["title"])}</text>')
 
-        # 氏名欄：タイトルと下部情報にかぶらない位置に固定
         name_y = y + 70
         for idx, line in enumerate(name_lines[:2]):
             parts.append(
@@ -326,14 +401,35 @@ def render_svg():
                 f'font-size="{name_size}" fill="#111" font-weight="700" font-family="sans-serif">{svg_escape(line)}</text>'
             )
 
-        # 生年月日は氏名より下、下部ステータスより上に配置
-        if text_value(b.get("birth", "")):
-            parts.append(f'<text x="{x+16}" y="{y+h-48}" font-size="17" fill="#333" font-family="sans-serif">生年月日：{svg_escape(b.get("birth", ""))}</text>')
+        line_y = y + 118
+        rows = [
+            f"続柄：{b.get('relation','')}",
+            f"生年月日：{b.get('birth','')}",
+            make_status_line(b.get("status", ""), b.get("death", "")),
+        ]
 
-        parts.append(f'<text x="{x+16}" y="{y+h-22}" font-size="18" fill="#111" font-family="sans-serif">{svg_escape(make_status_line(b.get("status", ""), b.get("death", "")))}</text>')
+        if text_value(b.get("inheritance_status", "")) or text_value(b.get("share", "")):
+            rows.append(f"遺産分割：{b.get('inheritance_status','')}　相続分：{b.get('share','')}")
 
-        if text_value(b.get("share", "")):
-            parts.append(f'<text x="{x+w-125}" y="{y+h-22}" font-size="17" fill="#333" font-family="sans-serif">相続分：{svg_escape(b.get("share"))}</text>')
+        # 本籍・住所は長くなりやすいため短縮表示
+        honseki_lines = split_text_lines(f"本籍：{b.get('honseki','')}", max_chars=22, max_lines=1) if text_value(b.get("honseki", "")) else []
+        address_lines = split_text_lines(f"住所：{b.get('address','')}", max_chars=22, max_lines=1) if text_value(b.get("address", "")) else []
+
+        for row in rows:
+            parts.append(f'<text x="{x+16}" y="{line_y}" font-size="17" fill="#111" font-family="sans-serif">{svg_escape(row)}</text>')
+            line_y += 23
+
+        for row in honseki_lines + address_lines:
+            parts.append(f'<text x="{x+16}" y="{line_y}" font-size="15" fill="#333" font-family="sans-serif">{svg_escape(row)}</text>')
+            line_y += 21
+
+    # 作成者情報
+    creator = st.session_state.creator
+    footer_x = 1180
+    footer_y = 1160
+    parts.append(f'<text x="{footer_x}" y="{footer_y}" font-size="18" fill="#111" font-family="sans-serif">作成日：{svg_escape(creator.get("作成日",""))}</text>')
+    parts.append(f'<text x="{footer_x}" y="{footer_y+28}" font-size="18" fill="#111" font-family="sans-serif">作成者：{svg_escape(creator.get("作成者氏名",""))}</text>')
+    parts.append(f'<text x="{footer_x}" y="{footer_y+56}" font-size="18" fill="#111" font-family="sans-serif">住所：{svg_escape(creator.get("作成者住所",""))}</text>')
 
     parts.append('</svg>')
     return "\n".join(parts)
@@ -342,6 +438,14 @@ def render_svg():
 # =============================
 # PDF出力
 # =============================
+def draw_double_or_single_pdf(c, x1, y1, x2, y2, kind):
+    if kind == "double":
+        c.line(x1 - 2, y1, x2 - 2, y2)
+        c.line(x1 + 2, y1, x2 + 2, y2)
+    else:
+        c.line(x1, y1, x2, y2)
+
+
 def draw_box_pdf(c, b, scale_x, scale_y, page_h, margin):
     x = margin + b["x"] * scale_x
     y = page_h - margin - (b["y"] + b["h"]) * scale_y
@@ -350,34 +454,45 @@ def draw_box_pdf(c, b, scale_x, scale_y, page_h, margin):
 
     c.setFillColor(colors.HexColor(b["fill"]))
     c.setStrokeColor(colors.black)
-    c.setLineWidth(1.2)
+    c.setLineWidth(1.1)
     c.rect(x, y, w, h, fill=1, stroke=1)
 
-    c.setFont("HeiseiKakuGo-W5", 10.5)
+    c.setFont("HeiseiKakuGo-W5", 9.5)
     c.setFillColor(colors.HexColor(b["title_color"]))
-    c.drawString(x + 7, y + h - 18, str(b["title"] or ""))
+    c.drawString(x + 7, y + h - 16, str(b["title"] or ""))
 
-    # 氏名：自動縮小＋最大2行
     name = text_value(b.get("name", ""))
-    name_size = calc_font_size(name, base=12, min_size=7, max_chars=7)
+    name_size = calc_font_size(name, base=11.5, min_size=7, max_chars=7)
     c.setFont("HeiseiKakuGo-W5", name_size)
     c.setFillColor(colors.black)
 
     name_lines = split_name_lines(name, max_chars=8)
-    base_y = y + h - 40
+    base_y = y + h - 36
     line_gap = name_size + 3
     for idx, line in enumerate(name_lines[:2]):
         c.drawString(x + 7, base_y - idx * line_gap, line)
 
-    c.setFont("HeiseiKakuGo-W5", 7.8)
-    if text_value(b.get("birth", "")):
-        c.drawString(x + 7, y + 26, f"生年月日：{b.get('birth')}")
+    c.setFont("HeiseiKakuGo-W5", 6.7)
+    current_y = y + h - 68
 
-    c.setFont("HeiseiKakuGo-W5", 8)
-    c.drawString(x + 7, y + 11, make_status_line(b.get("status", ""), b.get("death", "")))
+    rows = [
+        f"続柄：{b.get('relation','')}",
+        f"生年月日：{b.get('birth','')}",
+        make_status_line(b.get("status", ""), b.get("death", "")),
+    ]
 
-    if text_value(b.get("share", "")):
-        c.drawRightString(x + w - 7, y + 11, f"相続分：{b.get('share')}")
+    if text_value(b.get("inheritance_status", "")) or text_value(b.get("share", "")):
+        rows.append(f"遺産分割：{b.get('inheritance_status','')}　相続分：{b.get('share','')}")
+
+    if text_value(b.get("honseki", "")):
+        rows.extend(split_text_lines(f"本籍：{b.get('honseki','')}", max_chars=30, max_lines=2))
+
+    if text_value(b.get("address", "")):
+        rows.extend(split_text_lines(f"住所：{b.get('address','')}", max_chars=30, max_lines=2))
+
+    for row in rows[:8]:
+        c.drawString(x + 7, current_y, row)
+        current_y -= 9.2
 
 
 def create_pdf():
@@ -389,7 +504,7 @@ def create_pdf():
     page_w, page_h = page_size
 
     W, H, boxes, lines = make_layout()
-    margin = 24
+    margin = 20
     scale_x = (page_w - margin * 2) / W
     scale_y = (page_h - margin * 2) / H
 
@@ -399,16 +514,16 @@ def create_pdf():
     def ty(y):
         return page_h - margin - y * scale_y
 
-    c.setLineWidth(1.4)
-    c.rect(tx(35), ty(75), 150, 28, fill=0, stroke=1)
-    c.setFont("HeiseiKakuGo-W5", 15)
-    c.drawString(tx(48), ty(55), "相続関係説明図")
+    c.setLineWidth(1.2)
+    c.rect(tx(35), ty(80), 160, 28, fill=0, stroke=1)
+    c.setFont("HeiseiKakuGo-W5", 14)
+    c.drawString(tx(48), ty(58), "相続関係説明図")
 
     by_id = {b["id"]: b for b in boxes}
 
     c.setStrokeColor(colors.black)
-    c.setLineWidth(0.9)
-    for a, b, _kind in lines:
+    c.setLineWidth(0.8)
+    for a, b, kind in lines:
         if a not in by_id or b not in by_id:
             continue
         A, B = by_id[a], by_id[b]
@@ -416,13 +531,19 @@ def create_pdf():
         y1 = ty(A["y"] + A["h"] / 2)
         x2 = tx(B["x"] + B["w"] / 2)
         y2 = ty(B["y"] + B["h"] / 2)
-        c.line(x1, y1, x2, y2)
+        draw_double_or_single_pdf(c, x1, y1, x2, y2, kind)
 
     for b in boxes:
         draw_box_pdf(c, b, scale_x, scale_y, page_h, margin)
 
+    # 作成者情報
+    creator = st.session_state.creator
     c.setFont("HeiseiKakuGo-W5", 8)
-    c.drawRightString(page_w - 30, 18, f"作成日：{datetime.now().strftime('%Y-%m-%d')}")
+    footer_y = 40
+    c.drawString(page_w - 240, footer_y + 28, f"作成日：{creator.get('作成日','')}")
+    c.drawString(page_w - 240, footer_y + 14, f"作成者：{creator.get('作成者氏名','')}")
+    c.drawString(page_w - 240, footer_y, f"住所：{creator.get('作成者住所','')}")
+
     c.showPage()
     c.save()
     buffer.seek(0)
@@ -447,27 +568,41 @@ def find_jp_font(size=24):
     return ImageFont.load_default()
 
 
+def draw_multiline(draw, xy, lines, font, fill, gap=4):
+    x, y = xy
+    for line in lines:
+        draw.text((x, y), line, fill=fill, font=font)
+        y += font.size + gap if hasattr(font, "size") else 18
+    return y
+
+
 def create_png():
     W, H, boxes, lines = make_layout()
     img = Image.new("RGB", (W, H), "white")
     draw = ImageDraw.Draw(img)
 
-    font_title = find_jp_font(32)
+    font_title = find_jp_font(34)
     font_box_title = find_jp_font(23)
-    font_small = find_jp_font(18)
+    font_small = find_jp_font(17)
+    font_tiny = find_jp_font(15)
 
-    draw.rectangle([35, 20, 335, 75], outline="black", width=4)
-    draw.text((48, 28), "相続関係説明図", fill="black", font=font_title)
+    draw.rectangle([35, 20, 375, 80], outline="black", width=4)
+    draw.text((48, 30), "相続関係説明図", fill="black", font=font_title)
 
     by_id = {b["id"]: b for b in boxes}
 
-    for a, b, _kind in lines:
+    for a, b, kind in lines:
         if a not in by_id or b not in by_id:
             continue
         A, B = by_id[a], by_id[b]
         x1, y1 = A["x"] + A["w"] / 2, A["y"] + A["h"] / 2
         x2, y2 = B["x"] + B["w"] / 2, B["y"] + B["h"] / 2
-        draw.line([x1, y1, x2, y2], fill=LINE, width=3)
+
+        if kind == "double":
+            draw.line([x1 - 5, y1, x2 - 5, y2], fill=LINE, width=3)
+            draw.line([x1 + 5, y1, x2 + 5, y2], fill=LINE, width=3)
+        else:
+            draw.line([x1, y1, x2, y2], fill=LINE, width=3)
 
     for b in boxes:
         x, y, w, h = b["x"], b["y"], b["w"], b["h"]
@@ -483,13 +618,36 @@ def create_png():
         for idx, line in enumerate(name_lines[:2]):
             draw.text((x + 16, name_y + idx * (name_size + 5)), line, fill="black", font=font_name)
 
-        if text_value(b.get("birth", "")):
-            draw.text((x + 16, y + h - 55), f"生年月日：{b.get('birth')}", fill="#333333", font=font_small)
+        line_y = y + 110
+        rows = [
+            f"続柄：{b.get('relation','')}",
+            f"生年月日：{b.get('birth','')}",
+            make_status_line(b.get("status", ""), b.get("death", "")),
+        ]
 
-        draw.text((x + 16, y + h - 28), make_status_line(b.get("status", ""), b.get("death", "")), fill="black", font=font_small)
+        if text_value(b.get("inheritance_status", "")) or text_value(b.get("share", "")):
+            rows.append(f"遺産分割：{b.get('inheritance_status','')}　相続分：{b.get('share','')}")
 
-        if text_value(b.get("share", "")):
-            draw.text((x + w - 140, y + h - 28), f"相続分：{b.get('share')}", fill="#333333", font=font_small)
+        for row in rows:
+            draw.text((x + 16, line_y), row, fill="black", font=font_small)
+            line_y += 24
+
+        if text_value(b.get("honseki", "")):
+            for row in split_text_lines(f"本籍：{b.get('honseki','')}", max_chars=24, max_lines=1):
+                draw.text((x + 16, line_y), row, fill="#333333", font=font_tiny)
+                line_y += 22
+
+        if text_value(b.get("address", "")):
+            for row in split_text_lines(f"住所：{b.get('address','')}", max_chars=24, max_lines=1):
+                draw.text((x + 16, line_y), row, fill="#333333", font=font_tiny)
+                line_y += 22
+
+    creator = st.session_state.creator
+    footer_x = 1180
+    footer_y = 1160
+    draw.text((footer_x, footer_y), f"作成日：{creator.get('作成日','')}", fill="black", font=font_small)
+    draw.text((footer_x, footer_y + 28), f"作成者：{creator.get('作成者氏名','')}", fill="black", font=font_small)
+    draw.text((footer_x, footer_y + 56), f"住所：{creator.get('作成者住所','')}", fill="black", font=font_small)
 
     out = io.BytesIO()
     img.save(out, format="PNG")
@@ -497,7 +655,7 @@ def create_png():
 
 
 # =============================
-# SQLite 保存・読込
+# SQLite 操作
 # =============================
 def save_case(case_name):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -505,8 +663,8 @@ def save_case(case_name):
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO cases
-        (case_name, created_at, updated_at, decedent, spouse, parents, children, siblings)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (case_name, created_at, updated_at, decedent, spouse, parents, children, siblings, creator)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         case_name,
         now,
@@ -516,6 +674,7 @@ def save_case(case_name):
         df_to_json(st.session_state.parents_df),
         df_to_json(st.session_state.children_df),
         df_to_json(st.session_state.siblings_df),
+        pd.Series(st.session_state.creator).to_json(force_ascii=False),
     ))
     conn.commit()
     conn.close()
@@ -532,7 +691,7 @@ def list_cases():
 
 
 def load_case(case_id):
-    person_cols = ["続柄", "氏名", "状態", "生年月日", "死亡日", "相続分", "住所", "備考"]
+    person_cols = ["続柄", "氏名", "状態", "生年月日", "死亡日", "最後の本籍", "住所", "相続状況", "相続分", "備考"]
     conn = sqlite3.connect(DB_PATH)
     row = pd.read_sql_query("SELECT * FROM cases WHERE id = ?", conn, params=(case_id,))
     conn.close()
@@ -547,6 +706,11 @@ def load_case(case_id):
     st.session_state.parents_df = json_to_df(r["parents"], person_cols)
     st.session_state.children_df = json_to_df(r["children"], person_cols)
     st.session_state.siblings_df = json_to_df(r["siblings"], person_cols)
+    st.session_state.creator = json_to_series_dict(r.get("creator", "")) or {
+        "作成日": datetime.now().strftime("%Y-%m-%d"),
+        "作成者氏名": "",
+        "作成者住所": "",
+    }
     return True
 
 
@@ -556,7 +720,7 @@ def update_case(case_id, case_name):
     cur = conn.cursor()
     cur.execute("""
         UPDATE cases
-        SET case_name=?, updated_at=?, decedent=?, spouse=?, parents=?, children=?, siblings=?
+        SET case_name=?, updated_at=?, decedent=?, spouse=?, parents=?, children=?, siblings=?, creator=?
         WHERE id=?
     """, (
         case_name,
@@ -566,6 +730,7 @@ def update_case(case_id, case_name):
         df_to_json(st.session_state.parents_df),
         df_to_json(st.session_state.children_df),
         df_to_json(st.session_state.siblings_df),
+        pd.Series(st.session_state.creator).to_json(force_ascii=False),
         case_id
     ))
     conn.commit()
@@ -584,7 +749,7 @@ def delete_case(case_id):
 # UI
 # =============================
 st.title(APP_TITLE)
-st.caption("氏名の自動縮小・2行表示に対応。項目表示とかぶりにくいレイアウトへ修正しています。")
+st.caption("被相続人・相続人の氏名／生年月日／死亡日／本籍／住所／続柄／遺産分割状況／作成者情報を出力します。")
 
 menu = st.sidebar.radio(
     "メニュー",
@@ -592,78 +757,98 @@ menu = st.sidebar.radio(
     index=0
 )
 
-person_cols = ["続柄", "氏名", "状態", "生年月日", "死亡日", "相続分", "住所", "備考"]
+person_cols = ["続柄", "氏名", "状態", "生年月日", "死亡日", "最後の本籍", "住所", "相続状況", "相続分", "備考"]
 status_options = ["ご存命", "死亡", "相続放棄", "不明"]
+inheritance_options = ["", "相続", "分割", "相続放棄", "対象外", "未定"]
 
 if menu == "新規作成・編集":
     st.subheader("1. 案件名")
     st.session_state.case_name = st.text_input("案件名", st.session_state.case_name)
 
-    st.subheader("2. 被相続人")
+    st.subheader("2. 被相続人の情報")
     c1, c2, c3 = st.columns(3)
     with c1:
         st.session_state.decedent["氏名"] = st.text_input("被相続人 氏名", st.session_state.decedent.get("氏名", ""))
-        st.session_state.decedent["死亡日"] = st.text_input("死亡日", st.session_state.decedent.get("死亡日", ""), placeholder="例：2026年5月1日")
-    with c2:
         st.session_state.decedent["生年月日"] = st.text_input("被相続人 生年月日", st.session_state.decedent.get("生年月日", ""), placeholder="例：昭和20年1月1日")
-        st.session_state.decedent["最後の住所"] = st.text_input("最後の住所", st.session_state.decedent.get("最後の住所", ""))
+    with c2:
+        st.session_state.decedent["死亡日"] = st.text_input("死亡日", st.session_state.decedent.get("死亡日", ""), placeholder="例：令和6年5月1日")
+        st.session_state.decedent["最後の本籍"] = st.text_input("最後の本籍", st.session_state.decedent.get("最後の本籍", ""))
     with c3:
-        st.session_state.decedent["本籍"] = st.text_input("本籍", st.session_state.decedent.get("本籍", ""))
+        st.session_state.decedent["最後の住所"] = st.text_input("最後の住所", st.session_state.decedent.get("最後の住所", ""))
         st.session_state.decedent["備考"] = st.text_input("備考", st.session_state.decedent.get("備考", ""))
 
-    st.subheader("3. 配偶者")
+    st.subheader("3. 配偶者の情報")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.session_state.spouse["氏名"] = st.text_input("配偶者 氏名", st.session_state.spouse.get("氏名", ""))
-    with c2:
         current_status = st.session_state.spouse.get("状態", "ご存命")
         st.session_state.spouse["状態"] = st.selectbox(
             "配偶者 状態",
             status_options,
             index=status_options.index(current_status) if current_status in status_options else 0
         )
-    with c3:
+    with c2:
         st.session_state.spouse["生年月日"] = st.text_input("配偶者 生年月日", st.session_state.spouse.get("生年月日", ""))
         st.session_state.spouse["死亡日"] = st.text_input("配偶者 死亡日", st.session_state.spouse.get("死亡日", ""))
-    with c4:
-        st.session_state.spouse["相続分"] = st.text_input("配偶者 相続分", st.session_state.spouse.get("相続分", ""))
+    with c3:
+        st.session_state.spouse["最後の本籍"] = st.text_input("配偶者 本籍", st.session_state.spouse.get("最後の本籍", ""))
         st.session_state.spouse["住所"] = st.text_input("配偶者 住所", st.session_state.spouse.get("住所", ""))
+    with c4:
+        current_inheritance = st.session_state.spouse.get("相続状況", "相続")
+        st.session_state.spouse["相続状況"] = st.selectbox(
+            "配偶者 遺産分割状況",
+            inheritance_options,
+            index=inheritance_options.index(current_inheritance) if current_inheritance in inheritance_options else 1
+        )
+        st.session_state.spouse["相続分"] = st.text_input("配偶者 相続分", st.session_state.spouse.get("相続分", ""))
 
-    st.subheader("4. 相続人入力")
-    st.info("氏名が長い場合は、出力時に自動で文字サイズを下げ、必要に応じて2行表示します。")
+    st.subheader("4. 相続人の情報")
+    st.info("相続人ごとに、氏名・生年月日・死亡日・本籍・住所・続柄・遺産分割状況を入力できます。")
 
     st.markdown("#### 第二順位：父母")
     st.session_state.parents_df = st.data_editor(
-        st.session_state.parents_df,
+        normalize_people_df(st.session_state.parents_df, person_cols),
         num_rows="dynamic",
         use_container_width=True,
         key="parents_editor",
         column_config={
             "状態": st.column_config.SelectboxColumn("状態", options=status_options),
+            "相続状況": st.column_config.SelectboxColumn("相続状況", options=inheritance_options),
         }
     )
 
     st.markdown("#### 第一順位：子")
     st.session_state.children_df = st.data_editor(
-        st.session_state.children_df,
+        normalize_people_df(st.session_state.children_df, person_cols),
         num_rows="dynamic",
         use_container_width=True,
         key="children_editor",
         column_config={
             "状態": st.column_config.SelectboxColumn("状態", options=status_options),
+            "相続状況": st.column_config.SelectboxColumn("相続状況", options=inheritance_options),
         }
     )
 
     st.markdown("#### 第三順位：兄弟姉妹")
     st.session_state.siblings_df = st.data_editor(
-        st.session_state.siblings_df,
+        normalize_people_df(st.session_state.siblings_df, person_cols),
         num_rows="dynamic",
         use_container_width=True,
         key="siblings_editor",
         column_config={
             "状態": st.column_config.SelectboxColumn("状態", options=status_options),
+            "相続状況": st.column_config.SelectboxColumn("相続状況", options=inheritance_options),
         }
     )
+
+    st.subheader("5. 作成者情報")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.session_state.creator["作成日"] = st.text_input("作成日", st.session_state.creator.get("作成日", datetime.now().strftime("%Y-%m-%d")))
+    with c2:
+        st.session_state.creator["作成者氏名"] = st.text_input("作成者氏名", st.session_state.creator.get("作成者氏名", ""))
+    with c3:
+        st.session_state.creator["作成者住所"] = st.text_input("作成者住所", st.session_state.creator.get("作成者住所", ""))
 
     st.divider()
     c1, c2, c3 = st.columns(3)
@@ -713,9 +898,9 @@ elif menu == "保存データ管理":
 
 elif menu == "出力プレビュー":
     st.subheader("出力プレビュー")
-    st.caption("SVGで表示しています。PDF／PNGも同じ文字サイズ調整ロジックを使います。")
+    st.caption("配偶者との関係は二重線、その他の関係は一本線で表示します。")
     svg = render_svg()
-    st.components.v1.html(svg, height=780, scrolling=True)
+    st.components.v1.html(svg, height=820, scrolling=True)
 
     c1, c2 = st.columns(2)
     with c1:
@@ -733,4 +918,4 @@ elif menu == "出力プレビュー":
             mime="image/png"
         )
 
-st.sidebar.caption("Ver2.1：氏名フォント自動調整／2行表示／重なり軽減")
+st.sidebar.caption("Ver2.2：本籍・住所・続柄・遺産分割状況・作成者情報／配偶者二重線対応")
