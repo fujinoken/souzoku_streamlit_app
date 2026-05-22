@@ -16,7 +16,7 @@ from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from PIL import Image, ImageDraw, ImageFont
 
 
-APP_TITLE = "相続関係説明図ジェネレーター Ver2.2"
+APP_TITLE = "相続関係説明図ジェネレーター Ver2.3"
 DB_PATH = "souzoku_cases.db"
 BG = "#FFF4CF"
 LINE = "#222222"
@@ -54,7 +54,6 @@ def init_db():
         )
     """)
 
-    # 既存DBに creator 列がない場合の追加
     cur.execute("PRAGMA table_info(cases)")
     cols = [r[1] for r in cur.fetchall()]
     if "creator" not in cols:
@@ -91,6 +90,17 @@ def json_to_series_dict(text):
 # =============================
 # session_state
 # =============================
+PERSON_COLS = ["続柄", "氏名", "状態", "生年月日", "死亡日", "最後の本籍", "住所", "相続状況", "相続分", "備考"]
+
+
+def normalize_people_df(df, columns=PERSON_COLS):
+    df = df.copy().fillna("")
+    for c in columns:
+        if c not in df.columns:
+            df[c] = ""
+    return df[columns]
+
+
 def init_session():
     if "decedent" not in st.session_state:
         st.session_state.decedent = {
@@ -102,7 +112,6 @@ def init_session():
             "備考": "",
         }
 
-    # 古いキー互換
     if "本籍" in st.session_state.decedent and "最後の本籍" not in st.session_state.decedent:
         st.session_state.decedent["最後の本籍"] = st.session_state.decedent.get("本籍", "")
     if "最後の住所" not in st.session_state.decedent:
@@ -125,33 +134,31 @@ def init_session():
         if k not in st.session_state.spouse:
             st.session_state.spouse[k] = ""
 
-    person_cols = ["続柄", "氏名", "状態", "生年月日", "死亡日", "最後の本籍", "住所", "相続状況", "相続分", "備考"]
-
     if "parents_df" not in st.session_state:
         st.session_state.parents_df = pd.DataFrame([
             {"続柄": "父", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "最後の本籍": "", "住所": "", "相続状況": "", "相続分": "", "備考": ""},
             {"続柄": "母", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "最後の本籍": "", "住所": "", "相続状況": "", "相続分": "", "備考": ""},
-        ], columns=person_cols)
+        ], columns=PERSON_COLS)
     else:
-        st.session_state.parents_df = normalize_people_df(st.session_state.parents_df, person_cols)
+        st.session_state.parents_df = normalize_people_df(st.session_state.parents_df)
 
     if "children_df" not in st.session_state:
         st.session_state.children_df = pd.DataFrame([
             {"続柄": "長男", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "最後の本籍": "", "住所": "", "相続状況": "相続", "相続分": "", "備考": ""},
             {"続柄": "長女", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "最後の本籍": "", "住所": "", "相続状況": "相続", "相続分": "", "備考": ""},
             {"続柄": "二男", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "最後の本籍": "", "住所": "", "相続状況": "相続", "相続分": "", "備考": ""},
-        ], columns=person_cols)
+        ], columns=PERSON_COLS)
     else:
-        st.session_state.children_df = normalize_people_df(st.session_state.children_df, person_cols)
+        st.session_state.children_df = normalize_people_df(st.session_state.children_df)
 
     if "siblings_df" not in st.session_state:
         st.session_state.siblings_df = pd.DataFrame([
             {"続柄": "兄", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "最後の本籍": "", "住所": "", "相続状況": "", "相続分": "", "備考": ""},
             {"続柄": "姉", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "最後の本籍": "", "住所": "", "相続状況": "", "相続分": "", "備考": ""},
             {"続柄": "弟", "氏名": "", "状態": "ご存命", "生年月日": "", "死亡日": "", "最後の本籍": "", "住所": "", "相続状況": "", "相続分": "", "備考": ""},
-        ], columns=person_cols)
+        ], columns=PERSON_COLS)
     else:
-        st.session_state.siblings_df = normalize_people_df(st.session_state.siblings_df, person_cols)
+        st.session_state.siblings_df = normalize_people_df(st.session_state.siblings_df)
 
     if "creator" not in st.session_state:
         st.session_state.creator = {
@@ -164,15 +171,6 @@ def init_session():
         st.session_state.case_name = "新規案件"
 
 
-def normalize_people_df(df, columns):
-    df = df.copy().fillna("")
-    # 旧版の住所・相続分のみのデータにも対応
-    for c in columns:
-        if c not in df.columns:
-            df[c] = ""
-    return df[columns]
-
-
 init_db()
 init_session()
 
@@ -183,7 +181,7 @@ init_session()
 def clean_people(df):
     if df is None or df.empty:
         return df
-    df = df.fillna("")
+    df = normalize_people_df(df).fillna("")
     mask = df.apply(lambda r: any(str(v).strip() for v in r.values), axis=1)
     return df[mask].reset_index(drop=True)
 
@@ -192,6 +190,166 @@ def text_value(v):
     if v is None:
         return ""
     return str(v).strip()
+
+
+def is_active_heir_row(row):
+    """
+    基本の法定相続分計算対象。
+    氏名が空欄でも、続柄だけ入っている初期行を「入力済み相続人」とみなすと誤計算になりやすいため、
+    氏名がある行、または相続状況が明示された行を対象にする。
+    死亡・相続放棄・対象外は除外。
+    """
+    status = text_value(row.get("状態", ""))
+    inheritance_status = text_value(row.get("相続状況", ""))
+    name = text_value(row.get("氏名", ""))
+
+    if not name and inheritance_status not in ["相続", "分割", "未定"]:
+        return False
+
+    if status in ["死亡", "相続放棄"]:
+        return False
+
+    if inheritance_status in ["相続放棄", "対象外"]:
+        return False
+
+    return True
+
+
+def has_spouse():
+    sp = st.session_state.spouse
+    name = text_value(sp.get("氏名", ""))
+    inheritance_status = text_value(sp.get("相続状況", ""))
+    status = text_value(sp.get("状態", ""))
+
+    if not name:
+        return False
+    if status in ["死亡", "相続放棄"]:
+        return False
+    if inheritance_status in ["相続放棄", "対象外"]:
+        return False
+    return True
+
+
+def active_rows(df):
+    df = clean_people(df)
+    if df is None or df.empty:
+        return []
+    rows = []
+    for idx, row in df.iterrows():
+        if is_active_heir_row(row):
+            rows.append(idx)
+    return rows
+
+
+def calc_default_legal_shares():
+    """
+    民法900条の基本パターンに基づく簡易計算。
+    - 配偶者＋子：配偶者1/2、子全体1/2を人数で均等割
+    - 配偶者＋直系尊属：配偶者2/3、直系尊属全体1/3を人数で均等割
+    - 配偶者＋兄弟姉妹：配偶者3/4、兄弟姉妹全体1/4を人数で均等割
+    - 配偶者のみ：1
+    - 子のみ／直系尊属のみ／兄弟姉妹のみ：人数で均等割
+    ※代襲相続、半血兄弟姉妹、養子制限、特別受益等は手動修正前提。
+    """
+    spouse_exists = has_spouse()
+
+    child_idxs = active_rows(st.session_state.children_df)
+    parent_idxs = active_rows(st.session_state.parents_df)
+    sibling_idxs = active_rows(st.session_state.siblings_df)
+
+    result = {
+        "spouse": "",
+        "children": {},
+        "parents": {},
+        "siblings": {},
+        "pattern": "",
+        "note": "",
+    }
+
+    def each(total_num, total_den, count):
+        if count <= 0:
+            return ""
+        den = total_den * count
+        num = total_num
+        # 約分
+        import math
+        g = math.gcd(num, den)
+        num //= g
+        den //= g
+        return "1" if den == 1 else f"{num}/{den}"
+
+    if spouse_exists and child_idxs:
+        result["spouse"] = "1/2"
+        for idx in child_idxs:
+            result["children"][idx] = each(1, 2, len(child_idxs))
+        result["pattern"] = "配偶者＋子"
+        result["note"] = "配偶者1/2、子全体1/2を人数で均等割"
+
+    elif spouse_exists and parent_idxs:
+        result["spouse"] = "2/3"
+        for idx in parent_idxs:
+            result["parents"][idx] = each(1, 3, len(parent_idxs))
+        result["pattern"] = "配偶者＋直系尊属"
+        result["note"] = "配偶者2/3、直系尊属全体1/3を人数で均等割"
+
+    elif spouse_exists and sibling_idxs:
+        result["spouse"] = "3/4"
+        for idx in sibling_idxs:
+            result["siblings"][idx] = each(1, 4, len(sibling_idxs))
+        result["pattern"] = "配偶者＋兄弟姉妹"
+        result["note"] = "配偶者3/4、兄弟姉妹全体1/4を人数で均等割"
+
+    elif spouse_exists:
+        result["spouse"] = "1"
+        result["pattern"] = "配偶者のみ"
+        result["note"] = "配偶者が全部相続"
+
+    elif child_idxs:
+        for idx in child_idxs:
+            result["children"][idx] = each(1, 1, len(child_idxs))
+        result["pattern"] = "子のみ"
+        result["note"] = "子で均等割"
+
+    elif parent_idxs:
+        for idx in parent_idxs:
+            result["parents"][idx] = each(1, 1, len(parent_idxs))
+        result["pattern"] = "直系尊属のみ"
+        result["note"] = "直系尊属で均等割"
+
+    elif sibling_idxs:
+        for idx in sibling_idxs:
+            result["siblings"][idx] = each(1, 1, len(sibling_idxs))
+        result["pattern"] = "兄弟姉妹のみ"
+        result["note"] = "兄弟姉妹で均等割"
+
+    else:
+        result["pattern"] = "相続人未入力"
+        result["note"] = "氏名または相続状況が入力された相続人がありません。"
+
+    return result
+
+
+def apply_default_legal_shares(overwrite=True):
+    shares = calc_default_legal_shares()
+
+    if overwrite or not text_value(st.session_state.spouse.get("相続分", "")):
+        st.session_state.spouse["相続分"] = shares["spouse"]
+
+    def apply_df(df_key, share_map):
+        df = normalize_people_df(st.session_state[df_key])
+        for idx, share in share_map.items():
+            if idx in df.index:
+                if overwrite or not text_value(df.at[idx, "相続分"]):
+                    df.at[idx, "相続分"] = share
+                if not text_value(df.at[idx, "相続状況"]):
+                    df.at[idx, "相続状況"] = "相続"
+        st.session_state[df_key] = df
+
+    apply_df("children_df", shares["children"])
+    apply_df("parents_df", shares["parents"])
+    apply_df("siblings_df", shares["siblings"])
+
+    return shares
 
 
 def calc_font_size(text, base=24, min_size=12, max_chars=7):
@@ -371,7 +529,6 @@ def render_svg():
     parts.append('<rect x="35" y="20" width="340" height="60" fill="none" stroke="black" stroke-width="4"/>')
     parts.append('<text x="48" y="61" font-size="34" font-weight="700" font-family="sans-serif">相続関係説明図</text>')
 
-    # 線：配偶者は二重線、その他は一本線
     for a, b, kind in lines:
         if a not in by_id or b not in by_id:
             continue
@@ -411,7 +568,6 @@ def render_svg():
         if text_value(b.get("inheritance_status", "")) or text_value(b.get("share", "")):
             rows.append(f"遺産分割：{b.get('inheritance_status','')}　相続分：{b.get('share','')}")
 
-        # 本籍・住所は長くなりやすいため短縮表示
         honseki_lines = split_text_lines(f"本籍：{b.get('honseki','')}", max_chars=22, max_lines=1) if text_value(b.get("honseki", "")) else []
         address_lines = split_text_lines(f"住所：{b.get('address','')}", max_chars=22, max_lines=1) if text_value(b.get("address", "")) else []
 
@@ -423,7 +579,6 @@ def render_svg():
             parts.append(f'<text x="{x+16}" y="{line_y}" font-size="15" fill="#333" font-family="sans-serif">{svg_escape(row)}</text>')
             line_y += 21
 
-    # 作成者情報
     creator = st.session_state.creator
     footer_x = 1180
     footer_y = 1160
@@ -536,7 +691,6 @@ def create_pdf():
     for b in boxes:
         draw_box_pdf(c, b, scale_x, scale_y, page_h, margin)
 
-    # 作成者情報
     creator = st.session_state.creator
     c.setFont("HeiseiKakuGo-W5", 8)
     footer_y = 40
@@ -566,14 +720,6 @@ def find_jp_font(size=24):
         if os.path.exists(p):
             return ImageFont.truetype(p, size)
     return ImageFont.load_default()
-
-
-def draw_multiline(draw, xy, lines, font, fill, gap=4):
-    x, y = xy
-    for line in lines:
-        draw.text((x, y), line, fill=fill, font=font)
-        y += font.size + gap if hasattr(font, "size") else 18
-    return y
 
 
 def create_png():
@@ -691,7 +837,6 @@ def list_cases():
 
 
 def load_case(case_id):
-    person_cols = ["続柄", "氏名", "状態", "生年月日", "死亡日", "最後の本籍", "住所", "相続状況", "相続分", "備考"]
     conn = sqlite3.connect(DB_PATH)
     row = pd.read_sql_query("SELECT * FROM cases WHERE id = ?", conn, params=(case_id,))
     conn.close()
@@ -703,9 +848,9 @@ def load_case(case_id):
     st.session_state.case_name = r["case_name"]
     st.session_state.decedent = json_to_series_dict(r["decedent"])
     st.session_state.spouse = json_to_series_dict(r["spouse"])
-    st.session_state.parents_df = json_to_df(r["parents"], person_cols)
-    st.session_state.children_df = json_to_df(r["children"], person_cols)
-    st.session_state.siblings_df = json_to_df(r["siblings"], person_cols)
+    st.session_state.parents_df = json_to_df(r["parents"], PERSON_COLS)
+    st.session_state.children_df = json_to_df(r["children"], PERSON_COLS)
+    st.session_state.siblings_df = json_to_df(r["siblings"], PERSON_COLS)
     st.session_state.creator = json_to_series_dict(r.get("creator", "")) or {
         "作成日": datetime.now().strftime("%Y-%m-%d"),
         "作成者氏名": "",
@@ -749,7 +894,7 @@ def delete_case(case_id):
 # UI
 # =============================
 st.title(APP_TITLE)
-st.caption("被相続人・相続人の氏名／生年月日／死亡日／本籍／住所／続柄／遺産分割状況／作成者情報を出力します。")
+st.caption("法定相続分の基本値を自動入力し、その後に任意で変更できます。")
 
 menu = st.sidebar.radio(
     "メニュー",
@@ -757,7 +902,6 @@ menu = st.sidebar.radio(
     index=0
 )
 
-person_cols = ["続柄", "氏名", "状態", "生年月日", "死亡日", "最後の本籍", "住所", "相続状況", "相続分", "備考"]
 status_options = ["ご存命", "死亡", "相続放棄", "不明"]
 inheritance_options = ["", "相続", "分割", "相続放棄", "対象外", "未定"]
 
@@ -803,11 +947,11 @@ if menu == "新規作成・編集":
         st.session_state.spouse["相続分"] = st.text_input("配偶者 相続分", st.session_state.spouse.get("相続分", ""))
 
     st.subheader("4. 相続人の情報")
-    st.info("相続人ごとに、氏名・生年月日・死亡日・本籍・住所・続柄・遺産分割状況を入力できます。")
+    st.info("相続分は基本値を自動入力できます。入力後も各表の「相続分」欄で自由に変更できます。")
 
     st.markdown("#### 第二順位：父母")
     st.session_state.parents_df = st.data_editor(
-        normalize_people_df(st.session_state.parents_df, person_cols),
+        normalize_people_df(st.session_state.parents_df),
         num_rows="dynamic",
         use_container_width=True,
         key="parents_editor",
@@ -819,7 +963,7 @@ if menu == "新規作成・編集":
 
     st.markdown("#### 第一順位：子")
     st.session_state.children_df = st.data_editor(
-        normalize_people_df(st.session_state.children_df, person_cols),
+        normalize_people_df(st.session_state.children_df),
         num_rows="dynamic",
         use_container_width=True,
         key="children_editor",
@@ -831,7 +975,7 @@ if menu == "新規作成・編集":
 
     st.markdown("#### 第三順位：兄弟姉妹")
     st.session_state.siblings_df = st.data_editor(
-        normalize_people_df(st.session_state.siblings_df, person_cols),
+        normalize_people_df(st.session_state.siblings_df),
         num_rows="dynamic",
         use_container_width=True,
         key="siblings_editor",
@@ -841,7 +985,36 @@ if menu == "新規作成・編集":
         }
     )
 
-    st.subheader("5. 作成者情報")
+    st.subheader("5. 法定相続分の基本値")
+    shares_preview = calc_default_legal_shares()
+    st.caption(f"判定パターン：{shares_preview['pattern']} ／ {shares_preview['note']}")
+    c_auto1, c_auto2 = st.columns(2)
+    with c_auto1:
+        if st.button("法定相続分の基本値を入力する（空欄のみ）"):
+            applied = apply_default_legal_shares(overwrite=False)
+            st.success(f"基本値を空欄へ入力しました：{applied['pattern']}")
+            st.rerun()
+    with c_auto2:
+        if st.button("法定相続分の基本値で上書きする"):
+            applied = apply_default_legal_shares(overwrite=True)
+            st.warning(f"相続分を基本値で上書きしました：{applied['pattern']}")
+            st.rerun()
+
+    with st.expander("法定相続分の基本パターン表"):
+        st.markdown("""
+| 相続人の組み合わせ | 配偶者 | 子 | 直系尊属 | 兄弟姉妹 |
+|---|---:|---:|---:|---:|
+| 配偶者＋子 | 1/2 | 子全体で1/2 | - | - |
+| 配偶者＋直系尊属 | 2/3 | - | 直系尊属全体で1/3 | - |
+| 配偶者＋兄弟姉妹 | 3/4 | - | - | 兄弟姉妹全体で1/4 |
+| 配偶者のみ | 1 | - | - | - |
+| 子のみ | - | 均等割 | - | - |
+| 直系尊属のみ | - | - | 均等割 | - |
+| 兄弟姉妹のみ | - | - | - | 均等割 |
+""")
+        st.caption("※代襲相続、半血兄弟姉妹、養子、欠格・廃除、特別受益、寄与分などはこの簡易計算に含めず、手動修正してください。")
+
+    st.subheader("6. 作成者情報")
     c1, c2, c3 = st.columns(3)
     with c1:
         st.session_state.creator["作成日"] = st.text_input("作成日", st.session_state.creator.get("作成日", datetime.now().strftime("%Y-%m-%d")))
@@ -918,4 +1091,4 @@ elif menu == "出力プレビュー":
             mime="image/png"
         )
 
-st.sidebar.caption("Ver2.2：本籍・住所・続柄・遺産分割状況・作成者情報／配偶者二重線対応")
+st.sidebar.caption("Ver2.3：法定相続分の基本値自動入力／任意修正対応")
