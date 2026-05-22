@@ -21,7 +21,7 @@ from PIL import Image, ImageDraw, ImageFont
 import xlsxwriter
 
 
-APP_TITLE = "相続関係説明図ジェネレーター Ver3.2"
+APP_TITLE = "相続関係説明図ジェネレーター Ver3.3"
 DB_PATH = "souzoku_cases.db"
 
 BG = "#FFF4CF"
@@ -300,13 +300,87 @@ def get_heirs_df():
     return pd.DataFrame(rows, columns=["区分", "続柄", "氏名", "生年月日", "住所", "本籍", "相続分", "相続状況", "備考"])
 
 
-def calc_default_legal_shares():
-    spouse_exists = has_spouse()
-    children = clean_people(st.session_state.children_df)
-    parent_idxs = active_rows(st.session_state.parents_df)
-    sibling_idxs = active_rows(st.session_state.siblings_df)
+def clear_all_shares():
+    """法定相続分の自動計算前に、対象外の古い相続分を消す。"""
+    st.session_state.spouse["相続分"] = ""
 
-    result = {"spouse": "", "children": {}, "parents": {}, "siblings": {}, "descendants": {}, "pattern": "", "note": ""}
+    for df_key in ["parents_df", "children_df", "siblings_df"]:
+        df = normalize_people_df(st.session_state[df_key])
+        if "相続分" in df.columns:
+            df["相続分"] = ""
+        st.session_state[df_key] = df
+
+    df = normalize_desc_df(st.session_state.descendants_df)
+    if "相続分" in df.columns:
+        df["相続分"] = ""
+    st.session_state.descendants_df = df
+
+
+def row_is_disqualified(row):
+    """相続分計算から除外する状態。"""
+    status = text_value(row.get("状態", ""))
+    inheritance_status = text_value(row.get("相続状況", ""))
+    return status in ["相続放棄"] or inheritance_status in ["相続放棄", "対象外", "代襲者へ"]
+
+
+def row_is_alive_heir(row):
+    """本人が相続人として取得するか。死亡者は原則取得しない。"""
+    name = text_value(row.get("氏名", ""))
+    status = text_value(row.get("状態", ""))
+    inheritance_status = text_value(row.get("相続状況", ""))
+
+    if not name and inheritance_status not in ["相続", "分割", "未定", "代襲相続"]:
+        return False
+    if row_is_disqualified(row):
+        return False
+    if status == "死亡":
+        return False
+    return True
+
+
+def spouse_is_alive_heir():
+    sp = st.session_state.spouse
+    if not text_value(sp.get("氏名", "")):
+        return False
+    if text_value(sp.get("状態", "")) in ["死亡", "相続放棄"]:
+        return False
+    if text_value(sp.get("相続状況", "")) in ["相続放棄", "対象外", "代襲者へ"]:
+        return False
+    return True
+
+
+def active_descendant_rows_for_parent(parent_relation):
+    df = clean_desc(st.session_state.descendants_df)
+    idxs = []
+    for idx, row in df.iterrows():
+        if text_value(row.get("親", "")) == text_value(parent_relation) and row_is_alive_heir(row):
+            idxs.append(idx)
+    return idxs
+
+
+def calc_default_legal_shares():
+    """
+    民法900条の基本パターンに連動した相続分計算。
+    入力された「状態」「相続状況」に応じて、以下を自動反映する。
+
+    - 死亡：本人は相続分なし
+    - 相続放棄／対象外：相続分なし
+    - 死亡した子に孫がいる：その子の相続分を孫が代襲相続
+    - 子系統がいる場合：父母・兄弟姉妹は相続分なし
+    - 子系統がいない場合：父母へ
+    - 子系統・父母がいない場合：兄弟姉妹へ
+
+    ※兄弟姉妹側の代襲、半血兄弟姉妹、再代襲、養子制限、特別受益、寄与分等は手動調整前提。
+    """
+    result = {
+        "spouse": "",
+        "children": {},
+        "parents": {},
+        "siblings": {},
+        "descendants": {},
+        "pattern": "",
+        "note": "",
+    }
 
     def frac(num, den):
         import math
@@ -317,121 +391,183 @@ def calc_default_legal_shares():
         den //= g
         return "1" if den == 1 else f"{num}/{den}"
 
-    def split_share(total_num, total_den, count):
-        return "" if count <= 0 else frac(total_num, total_den * count)
+    spouse_exists = spouse_is_alive_heir()
 
+    # -------------------------
+    # 第一順位：子・孫の系統
+    # -------------------------
+    children = clean_people(st.session_state.children_df)
     child_branches = []
+
     for idx, row in children.iterrows():
         relation = text_value(row.get("続柄", ""))
         if not relation:
             continue
+
+        if row_is_disqualified(row):
+            continue
+
         status = text_value(row.get("状態", ""))
         desc_idxs = active_descendant_rows_for_parent(relation)
-        if status == "死亡" and desc_idxs:
-            child_branches.append({"type": "descendant", "child_idx": idx, "relation": relation, "desc_idxs": desc_idxs})
-        elif is_active_heir_row(row):
-            child_branches.append({"type": "child", "child_idx": idx, "relation": relation, "desc_idxs": []})
 
-    if spouse_exists and child_branches:
-        result["spouse"] = "1/2"
-        branch_den = 2 * len(child_branches)
-        for branch in child_branches:
-            if branch["type"] == "child":
-                result["children"][branch["child_idx"]] = frac(1, branch_den)
+        if status == "死亡":
+            # 死亡した子に代襲者がいる場合のみ、その系統を数える
+            if desc_idxs:
+                child_branches.append({
+                    "type": "descendant",
+                    "child_idx": idx,
+                    "relation": relation,
+                    "desc_idxs": desc_idxs
+                })
             else:
-                for didx in branch["desc_idxs"]:
-                    result["descendants"][didx] = frac(1, branch_den * len(branch["desc_idxs"]))
-                result["children"][branch["child_idx"]] = "代襲者へ"
-        result["pattern"] = "配偶者＋子系統（代襲相続含む）"
-        result["note"] = "配偶者1/2、子系統全体1/2。死亡した子の取得分を孫で均等割。"
-        return result
+                result["children"][idx] = ""
+        else:
+            # ご存命・不明等で、相続人として扱う
+            if row_is_alive_heir(row):
+                child_branches.append({
+                    "type": "child",
+                    "child_idx": idx,
+                    "relation": relation,
+                    "desc_idxs": []
+                })
 
     if child_branches:
-        branch_den = len(child_branches)
+        if spouse_exists:
+            result["spouse"] = "1/2"
+            branch_den = 2 * len(child_branches)
+            result["pattern"] = "配偶者＋子系統"
+            result["note"] = "配偶者1/2、子系統全体1/2。死亡した子の分は代襲相続人で均等割。"
+        else:
+            branch_den = len(child_branches)
+            result["pattern"] = "子系統のみ"
+            result["note"] = "子系統で均等割。死亡した子の分は代襲相続人で均等割。"
+
         for branch in child_branches:
             if branch["type"] == "child":
                 result["children"][branch["child_idx"]] = frac(1, branch_den)
             else:
-                for didx in branch["desc_idxs"]:
-                    result["descendants"][didx] = frac(1, branch_den * len(branch["desc_idxs"]))
                 result["children"][branch["child_idx"]] = "代襲者へ"
-        result["pattern"] = "子系統のみ（代襲相続含む）"
-        result["note"] = "子系統で均等割。死亡した子の取得分を孫で均等割。"
+                desc_count = len(branch["desc_idxs"])
+                for didx in branch["desc_idxs"]:
+                    result["descendants"][didx] = frac(1, branch_den * desc_count)
+
         return result
 
-    if spouse_exists and parent_idxs:
-        result["spouse"] = "2/3"
-        for idx in parent_idxs:
-            result["parents"][idx] = split_share(1, 3, len(parent_idxs))
-        result["pattern"] = "配偶者＋直系尊属"
-        result["note"] = "配偶者2/3、直系尊属全体1/3を人数で均等割"
+    # -------------------------
+    # 第二順位：父母・直系尊属
+    # -------------------------
+    parents = clean_people(st.session_state.parents_df)
+    parent_idxs = []
+    for idx, row in parents.iterrows():
+        if row_is_alive_heir(row):
+            parent_idxs.append(idx)
+
+    if parent_idxs:
+        if spouse_exists:
+            result["spouse"] = "2/3"
+            for idx in parent_idxs:
+                result["parents"][idx] = frac(1, 3 * len(parent_idxs))
+            result["pattern"] = "配偶者＋直系尊属"
+            result["note"] = "配偶者2/3、直系尊属全体1/3を人数で均等割。"
+        else:
+            for idx in parent_idxs:
+                result["parents"][idx] = frac(1, len(parent_idxs))
+            result["pattern"] = "直系尊属のみ"
+            result["note"] = "直系尊属で均等割。"
         return result
 
-    if spouse_exists and sibling_idxs:
-        result["spouse"] = "3/4"
-        for idx in sibling_idxs:
-            result["siblings"][idx] = split_share(1, 4, len(sibling_idxs))
-        result["pattern"] = "配偶者＋兄弟姉妹"
-        result["note"] = "配偶者3/4、兄弟姉妹全体1/4を人数で均等割"
+    # -------------------------
+    # 第三順位：兄弟姉妹
+    # -------------------------
+    siblings = clean_people(st.session_state.siblings_df)
+    sibling_idxs = []
+    for idx, row in siblings.iterrows():
+        if row_is_alive_heir(row):
+            sibling_idxs.append(idx)
+
+    if sibling_idxs:
+        if spouse_exists:
+            result["spouse"] = "3/4"
+            for idx in sibling_idxs:
+                result["siblings"][idx] = frac(1, 4 * len(sibling_idxs))
+            result["pattern"] = "配偶者＋兄弟姉妹"
+            result["note"] = "配偶者3/4、兄弟姉妹全体1/4を人数で均等割。"
+        else:
+            for idx in sibling_idxs:
+                result["siblings"][idx] = frac(1, len(sibling_idxs))
+            result["pattern"] = "兄弟姉妹のみ"
+            result["note"] = "兄弟姉妹で均等割。"
         return result
 
+    # -------------------------
+    # 配偶者のみ
+    # -------------------------
     if spouse_exists:
         result["spouse"] = "1"
         result["pattern"] = "配偶者のみ"
-        result["note"] = "配偶者が全部相続"
-        return result
-
-    if parent_idxs:
-        for idx in parent_idxs:
-            result["parents"][idx] = split_share(1, 1, len(parent_idxs))
-        result["pattern"] = "直系尊属のみ"
-        result["note"] = "直系尊属で均等割"
-        return result
-
-    if sibling_idxs:
-        for idx in sibling_idxs:
-            result["siblings"][idx] = split_share(1, 1, len(sibling_idxs))
-        result["pattern"] = "兄弟姉妹のみ"
-        result["note"] = "兄弟姉妹で均等割"
+        result["note"] = "配偶者が全部相続。"
         return result
 
     result["pattern"] = "相続人未入力"
-    result["note"] = "氏名または相続状況が入力された相続人がありません。"
+    result["note"] = "相続分を計算できる相続人がありません。"
     return result
 
 
 def apply_default_legal_shares(overwrite=True):
+    """
+    相続状況・死亡・相続放棄・代襲相続に応じて相続分を反映。
+    overwrite=True の場合、古い相続分を一度消してから再計算するため、
+    状態変更に追従して割合が変わる。
+    """
+    if overwrite:
+        clear_all_shares()
+
     shares = calc_default_legal_shares()
+
     if overwrite or not text_value(st.session_state.spouse.get("相続分", "")):
         st.session_state.spouse["相続分"] = shares["spouse"]
 
     def apply_people(df_key, share_map):
         df = normalize_people_df(st.session_state[df_key])
-        for idx, share in share_map.items():
-            if idx in df.index:
+        for idx in df.index:
+            if idx in share_map:
+                share = share_map[idx]
                 if overwrite or not text_value(df.at[idx, "相続分"]):
                     df.at[idx, "相続分"] = share
                 if share == "代襲者へ":
                     df.at[idx, "相続状況"] = "代襲者へ"
-                elif not text_value(df.at[idx, "相続状況"]):
+                elif share and not text_value(df.at[idx, "相続状況"]):
                     df.at[idx, "相続状況"] = "相続"
+            elif overwrite:
+                # 相続対象から外れた人は空欄にする
+                df.at[idx, "相続分"] = ""
         st.session_state[df_key] = df
 
     def apply_desc(df_key, share_map):
         df = normalize_desc_df(st.session_state[df_key])
-        for idx, share in share_map.items():
-            if idx in df.index:
+        for idx in df.index:
+            if idx in share_map:
+                share = share_map[idx]
                 if overwrite or not text_value(df.at[idx, "相続分"]):
                     df.at[idx, "相続分"] = share
-                if not text_value(df.at[idx, "相続状況"]):
+                if share and not text_value(df.at[idx, "相続状況"]):
                     df.at[idx, "相続状況"] = "代襲相続"
+            elif overwrite:
+                df.at[idx, "相続分"] = ""
         st.session_state[df_key] = df
 
     apply_people("children_df", shares["children"])
     apply_people("parents_df", shares["parents"])
     apply_people("siblings_df", shares["siblings"])
     apply_desc("descendants_df", shares["descendants"])
+
     return shares
+
+
+def auto_recalculate_legal_shares():
+    """画面入力後に毎回、現在の相続状況へ法定相続分を連動反映する。"""
+    return apply_default_legal_shares(overwrite=True)
+
 
 
 # =============================
@@ -1226,7 +1362,7 @@ def delete_case(case_id):
 # UI
 # =============================
 st.title(APP_TITLE)
-st.caption("父母・配偶者は婚姻関係として二重線、子・兄弟姉妹はその婚姻線から一本線で接続します。")
+st.caption("相続状況・死亡・相続放棄・代襲相続に応じて、民法の基本割合を自動反映します。")
 
 menu = st.sidebar.radio("メニュー", ["新規作成・編集", "相続人一覧・協議書", "保存データ管理", "出力プレビュー"], index=0)
 status_options = ["ご存命", "死亡", "相続放棄", "不明"]
@@ -1300,17 +1436,20 @@ if menu == "新規作成・編集":
         column_config={"状態": st.column_config.SelectboxColumn("状態", options=status_options), "相続状況": st.column_config.SelectboxColumn("相続状況", options=inheritance_options)}
     )
 
+    # 相続状況・死亡・相続放棄・代襲相続に応じて、民法の基本割合を自動反映
+    shares_preview = auto_recalculate_legal_shares()
+
     st.subheader("5. 法定相続分の基本値")
-    shares_preview = calc_default_legal_shares()
+    st.info("現在の「状態」「相続状況」に応じて、相続分を自動で再計算しています。手動変更したい場合は、最後に相続分欄を直接編集してください。")
     st.caption(f"判定パターン：{shares_preview['pattern']} ／ {shares_preview['note']}")
     c_auto1, c_auto2 = st.columns(2)
     with c_auto1:
-        if st.button("法定相続分の基本値を入力する（空欄のみ）"):
+        if st.button("法定相続分を再計算する（空欄のみ）"):
             applied = apply_default_legal_shares(overwrite=False)
             st.success(f"基本値を空欄へ入力しました：{applied['pattern']}")
             st.rerun()
     with c_auto2:
-        if st.button("法定相続分の基本値で上書きする"):
+        if st.button("法定相続分を現在の状況で再計算・上書き"):
             applied = apply_default_legal_shares(overwrite=True)
             st.warning(f"相続分を基本値で上書きしました：{applied['pattern']}")
             st.rerun()
@@ -1417,4 +1556,4 @@ elif menu == "出力プレビュー":
     with c3:
         st.download_button("関係図Excelダウンロード", data=create_diagram_excel(), file_name=f"{st.session_state.case_name or '無題案件'}_相続関係説明図.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-st.sidebar.caption("Ver3.2：PDF出力エラー修正版")
+st.sidebar.caption("Ver3.3：相続状況連動・法定相続分自動反映")
