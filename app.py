@@ -16,20 +16,18 @@ from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from PIL import Image, ImageDraw, ImageFont
 
 
-APP_TITLE = "相続関係説明図ジェネレーター Ver2.3"
+APP_TITLE = "相続関係説明図ジェネレーター Ver2.4"
 DB_PATH = "souzoku_cases.db"
 BG = "#FFF4CF"
 LINE = "#222222"
 
-
-# =============================
-# 基本設定
-# =============================
 st.set_page_config(
     page_title=APP_TITLE,
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+PERSON_COLS = ["続柄", "氏名", "状態", "生年月日", "死亡日", "最後の本籍", "住所", "相続状況", "相続分", "備考"]
 
 
 # =============================
@@ -67,7 +65,7 @@ def df_to_json(df):
     return df.fillna("").to_json(orient="records", force_ascii=False)
 
 
-def json_to_df(text, columns):
+def json_to_df(text, columns=PERSON_COLS):
     if not text:
         return pd.DataFrame(columns=columns)
     try:
@@ -90,9 +88,6 @@ def json_to_series_dict(text):
 # =============================
 # session_state
 # =============================
-PERSON_COLS = ["続柄", "氏名", "状態", "生年月日", "死亡日", "最後の本籍", "住所", "相続状況", "相続分", "備考"]
-
-
 def normalize_people_df(df, columns=PERSON_COLS):
     df = df.copy().fillna("")
     for c in columns:
@@ -180,7 +175,7 @@ init_session()
 # =============================
 def clean_people(df):
     if df is None or df.empty:
-        return df
+        return pd.DataFrame(columns=PERSON_COLS)
     df = normalize_people_df(df).fillna("")
     mask = df.apply(lambda r: any(str(v).strip() for v in r.values), axis=1)
     return df[mask].reset_index(drop=True)
@@ -193,25 +188,16 @@ def text_value(v):
 
 
 def is_active_heir_row(row):
-    """
-    基本の法定相続分計算対象。
-    氏名が空欄でも、続柄だけ入っている初期行を「入力済み相続人」とみなすと誤計算になりやすいため、
-    氏名がある行、または相続状況が明示された行を対象にする。
-    死亡・相続放棄・対象外は除外。
-    """
     status = text_value(row.get("状態", ""))
     inheritance_status = text_value(row.get("相続状況", ""))
     name = text_value(row.get("氏名", ""))
 
     if not name and inheritance_status not in ["相続", "分割", "未定"]:
         return False
-
     if status in ["死亡", "相続放棄"]:
         return False
-
     if inheritance_status in ["相続放棄", "対象外"]:
         return False
-
     return True
 
 
@@ -232,8 +218,6 @@ def has_spouse():
 
 def active_rows(df):
     df = clean_people(df)
-    if df is None or df.empty:
-        return []
     rows = []
     for idx, row in df.iterrows():
         if is_active_heir_row(row):
@@ -242,36 +226,18 @@ def active_rows(df):
 
 
 def calc_default_legal_shares():
-    """
-    民法900条の基本パターンに基づく簡易計算。
-    - 配偶者＋子：配偶者1/2、子全体1/2を人数で均等割
-    - 配偶者＋直系尊属：配偶者2/3、直系尊属全体1/3を人数で均等割
-    - 配偶者＋兄弟姉妹：配偶者3/4、兄弟姉妹全体1/4を人数で均等割
-    - 配偶者のみ：1
-    - 子のみ／直系尊属のみ／兄弟姉妹のみ：人数で均等割
-    ※代襲相続、半血兄弟姉妹、養子制限、特別受益等は手動修正前提。
-    """
     spouse_exists = has_spouse()
-
     child_idxs = active_rows(st.session_state.children_df)
     parent_idxs = active_rows(st.session_state.parents_df)
     sibling_idxs = active_rows(st.session_state.siblings_df)
 
-    result = {
-        "spouse": "",
-        "children": {},
-        "parents": {},
-        "siblings": {},
-        "pattern": "",
-        "note": "",
-    }
+    result = {"spouse": "", "children": {}, "parents": {}, "siblings": {}, "pattern": "", "note": ""}
 
     def each(total_num, total_den, count):
         if count <= 0:
             return ""
         den = total_den * count
         num = total_num
-        # 約分
         import math
         g = math.gcd(num, den)
         num //= g
@@ -348,7 +314,6 @@ def apply_default_legal_shares(overwrite=True):
     apply_df("children_df", shares["children"])
     apply_df("parents_df", shares["parents"])
     apply_df("siblings_df", shares["siblings"])
-
     return shares
 
 
@@ -389,7 +354,7 @@ def make_status_line(status, death):
     return f"□{status}"
 
 
-def person_to_box(row, title, box_id, x, y, w=390, h=205, fill=BG, title_color="#D58A00"):
+def person_to_box(row, title, box_id, x, y, w=390, h=220, fill=BG, title_color="#D58A00"):
     return {
         "id": box_id,
         "title": title,
@@ -413,6 +378,12 @@ def person_to_box(row, title, box_id, x, y, w=390, h=205, fill=BG, title_color="
 # レイアウト計算
 # =============================
 def make_layout():
+    """
+    Ver2.4:
+    - 兄弟姉妹が増えても途中で切れないように、Hを動的計算
+    - 画面プレビュー、PNG、PDFすべて同じ全体サイズを使う
+    - PDFは全体をA4横へ縮小して必ず1ページに収める
+    """
     parents = clean_people(st.session_state.parents_df)
     children = clean_people(st.session_state.children_df)
     siblings = clean_people(st.session_state.siblings_df)
@@ -420,7 +391,8 @@ def make_layout():
     boxes = []
     lines = []
 
-    W, H = 1800, 1250
+    W = 1800
+    box_h = 220
 
     decedent_row = {
         "氏名": st.session_state.decedent.get("氏名", ""),
@@ -440,7 +412,7 @@ def make_layout():
         "被相続人（亡くなった方）",
         "decedent",
         710, 390,
-        w=390, h=220,
+        w=390, h=box_h,
         fill="#FFFFFF",
         title_color="#111111"
     ))
@@ -464,7 +436,7 @@ def make_layout():
             "必ず相続人　配偶者",
             "spouse",
             710, 100,
-            w=420, h=220,
+            w=420, h=box_h,
             fill=BG,
             title_color="#C98300"
         ))
@@ -472,43 +444,46 @@ def make_layout():
 
     # 父母
     px, py = 65, 265
+    parent_gap = 270
     for i, row in parents.iterrows():
         boxes.append(person_to_box(
             row,
             f"第二順位　被相続人等の{row.get('続柄','')}",
             f"parent_{i}",
-            px, py + i * 270,
-            w=450, h=220
+            px, py + i * parent_gap,
+            w=450, h=box_h
         ))
         lines.append((f"parent_{i}", "decedent", "single"))
 
     # 子
-    child_count = max(len(children), 1)
-    start_y = 115
-    gap = min(260, max(215, int((H - 210) / max(child_count, 1))))
     cx = 1280
+    child_start_y = 115
+    child_gap = 260
     for i, row in children.iterrows():
         boxes.append(person_to_box(
             row,
             "第一順位　被相続人等の子",
             f"child_{i}",
-            cx, start_y + i * gap,
-            w=450, h=220
+            cx, child_start_y + i * child_gap,
+            w=450, h=box_h
         ))
         lines.append(("decedent", f"child_{i}", "single"))
 
     # 兄弟姉妹
     sx, sy = 710, 700
-    sgap = 245
+    sibling_gap = 245
     for i, row in siblings.iterrows():
         boxes.append(person_to_box(
             row,
             f"第三順位　被相続人等の{row.get('続柄','兄弟姉妹')}",
             f"sibling_{i}",
-            sx, sy + i * sgap,
-            w=420, h=220
+            sx, sy + i * sibling_gap,
+            w=420, h=box_h
         ))
         lines.append(("decedent", f"sibling_{i}", "single"))
+
+    max_bottom = max([b["y"] + b["h"] for b in boxes] + [900])
+    H = max(1250, max_bottom + 170)  # 作成者情報の余白を含める
 
     return W, H, boxes, lines
 
@@ -581,7 +556,7 @@ def render_svg():
 
     creator = st.session_state.creator
     footer_x = 1180
-    footer_y = 1160
+    footer_y = H - 90
     parts.append(f'<text x="{footer_x}" y="{footer_y}" font-size="18" fill="#111" font-family="sans-serif">作成日：{svg_escape(creator.get("作成日",""))}</text>')
     parts.append(f'<text x="{footer_x}" y="{footer_y+28}" font-size="18" fill="#111" font-family="sans-serif">作成者：{svg_escape(creator.get("作成者氏名",""))}</text>')
     parts.append(f'<text x="{footer_x}" y="{footer_y+56}" font-size="18" fill="#111" font-family="sans-serif">住所：{svg_escape(creator.get("作成者住所",""))}</text>')
@@ -593,42 +568,44 @@ def render_svg():
 # =============================
 # PDF出力
 # =============================
-def draw_double_or_single_pdf(c, x1, y1, x2, y2, kind):
+def draw_double_or_single_pdf(c, x1, y1, x2, y2, kind, scale=1):
     if kind == "double":
-        c.line(x1 - 2, y1, x2 - 2, y2)
-        c.line(x1 + 2, y1, x2 + 2, y2)
+        offset = 2 * scale
+        c.line(x1 - offset, y1, x2 - offset, y2)
+        c.line(x1 + offset, y1, x2 + offset, y2)
     else:
         c.line(x1, y1, x2, y2)
 
 
-def draw_box_pdf(c, b, scale_x, scale_y, page_h, margin):
-    x = margin + b["x"] * scale_x
-    y = page_h - margin - (b["y"] + b["h"]) * scale_y
-    w = b["w"] * scale_x
-    h = b["h"] * scale_y
+def draw_box_pdf(c, b, scale, offset_x, offset_y, original_h):
+    x = offset_x + b["x"] * scale
+    y = offset_y + (original_h - b["y"] - b["h"]) * scale
+    w = b["w"] * scale
+    h = b["h"] * scale
 
     c.setFillColor(colors.HexColor(b["fill"]))
     c.setStrokeColor(colors.black)
-    c.setLineWidth(1.1)
+    c.setLineWidth(max(0.6, 1.1 * scale))
     c.rect(x, y, w, h, fill=1, stroke=1)
 
-    c.setFont("HeiseiKakuGo-W5", 9.5)
+    c.setFont("HeiseiKakuGo-W5", max(5.8, 9.5 * scale))
     c.setFillColor(colors.HexColor(b["title_color"]))
-    c.drawString(x + 7, y + h - 16, str(b["title"] or ""))
+    c.drawString(x + 7 * scale, y + h - 16 * scale, str(b["title"] or ""))
 
     name = text_value(b.get("name", ""))
-    name_size = calc_font_size(name, base=11.5, min_size=7, max_chars=7)
+    name_size = calc_font_size(name, base=11.5, min_size=7, max_chars=7) * scale
+    name_size = max(5.5, name_size)
     c.setFont("HeiseiKakuGo-W5", name_size)
     c.setFillColor(colors.black)
 
     name_lines = split_name_lines(name, max_chars=8)
-    base_y = y + h - 36
-    line_gap = name_size + 3
+    base_y = y + h - 36 * scale
+    line_gap = name_size + 3 * scale
     for idx, line in enumerate(name_lines[:2]):
-        c.drawString(x + 7, base_y - idx * line_gap, line)
+        c.drawString(x + 7 * scale, base_y - idx * line_gap, line)
 
-    c.setFont("HeiseiKakuGo-W5", 6.7)
-    current_y = y + h - 68
+    c.setFont("HeiseiKakuGo-W5", max(4.8, 6.7 * scale))
+    current_y = y + h - 68 * scale
 
     rows = [
         f"続柄：{b.get('relation','')}",
@@ -646,8 +623,8 @@ def draw_box_pdf(c, b, scale_x, scale_y, page_h, margin):
         rows.extend(split_text_lines(f"住所：{b.get('address','')}", max_chars=30, max_lines=2))
 
     for row in rows[:8]:
-        c.drawString(x + 7, current_y, row)
-        current_y -= 9.2
+        c.drawString(x + 7 * scale, current_y, row)
+        current_y -= 9.2 * scale
 
 
 def create_pdf():
@@ -659,25 +636,30 @@ def create_pdf():
     page_w, page_h = page_size
 
     W, H, boxes, lines = make_layout()
-    margin = 20
-    scale_x = (page_w - margin * 2) / W
-    scale_y = (page_h - margin * 2) / H
+    margin = 18
+
+    # 縦横のうち厳しい方に合わせ、全体を必ずA4横1ページ内へ収める
+    scale = min((page_w - margin * 2) / W, (page_h - margin * 2) / H)
+    rendered_w = W * scale
+    rendered_h = H * scale
+    offset_x = (page_w - rendered_w) / 2
+    offset_y = (page_h - rendered_h) / 2
 
     def tx(x):
-        return margin + x * scale_x
+        return offset_x + x * scale
 
     def ty(y):
-        return page_h - margin - y * scale_y
+        return offset_y + (H - y) * scale
 
-    c.setLineWidth(1.2)
-    c.rect(tx(35), ty(80), 160, 28, fill=0, stroke=1)
-    c.setFont("HeiseiKakuGo-W5", 14)
+    c.setLineWidth(max(0.7, 1.2 * scale))
+    c.rect(tx(35), ty(80), 160 * scale, 28 * scale, fill=0, stroke=1)
+    c.setFont("HeiseiKakuGo-W5", max(7, 14 * scale))
     c.drawString(tx(48), ty(58), "相続関係説明図")
 
     by_id = {b["id"]: b for b in boxes}
 
     c.setStrokeColor(colors.black)
-    c.setLineWidth(0.8)
+    c.setLineWidth(max(0.4, 0.8 * scale))
     for a, b, kind in lines:
         if a not in by_id or b not in by_id:
             continue
@@ -686,17 +668,18 @@ def create_pdf():
         y1 = ty(A["y"] + A["h"] / 2)
         x2 = tx(B["x"] + B["w"] / 2)
         y2 = ty(B["y"] + B["h"] / 2)
-        draw_double_or_single_pdf(c, x1, y1, x2, y2, kind)
+        draw_double_or_single_pdf(c, x1, y1, x2, y2, kind, scale)
 
     for b in boxes:
-        draw_box_pdf(c, b, scale_x, scale_y, page_h, margin)
+        draw_box_pdf(c, b, scale, offset_x, offset_y, H)
 
     creator = st.session_state.creator
-    c.setFont("HeiseiKakuGo-W5", 8)
-    footer_y = 40
-    c.drawString(page_w - 240, footer_y + 28, f"作成日：{creator.get('作成日','')}")
-    c.drawString(page_w - 240, footer_y + 14, f"作成者：{creator.get('作成者氏名','')}")
-    c.drawString(page_w - 240, footer_y, f"住所：{creator.get('作成者住所','')}")
+    footer_x = tx(1180)
+    footer_y = ty(H - 40)
+    c.setFont("HeiseiKakuGo-W5", max(5, 8 * scale))
+    c.drawString(footer_x, footer_y + 28 * scale, f"作成日：{creator.get('作成日','')}")
+    c.drawString(footer_x, footer_y + 14 * scale, f"作成者：{creator.get('作成者氏名','')}")
+    c.drawString(footer_x, footer_y, f"住所：{creator.get('作成者住所','')}")
 
     c.showPage()
     c.save()
@@ -790,7 +773,7 @@ def create_png():
 
     creator = st.session_state.creator
     footer_x = 1180
-    footer_y = 1160
+    footer_y = H - 90
     draw.text((footer_x, footer_y), f"作成日：{creator.get('作成日','')}", fill="black", font=font_small)
     draw.text((footer_x, footer_y + 28), f"作成者：{creator.get('作成者氏名','')}", fill="black", font=font_small)
     draw.text((footer_x, footer_y + 56), f"住所：{creator.get('作成者住所','')}", fill="black", font=font_small)
@@ -894,7 +877,7 @@ def delete_case(case_id):
 # UI
 # =============================
 st.title(APP_TITLE)
-st.caption("法定相続分の基本値を自動入力し、その後に任意で変更できます。")
+st.caption("兄弟姉妹など人数が増えても、プレビュー・PDF・PNGで全員が表示されるように修正しました。")
 
 menu = st.sidebar.radio(
     "メニュー",
@@ -1071,9 +1054,11 @@ elif menu == "保存データ管理":
 
 elif menu == "出力プレビュー":
     st.subheader("出力プレビュー")
-    st.caption("配偶者との関係は二重線、その他の関係は一本線で表示します。")
+    st.caption("表示領域内で縦スクロールできます。PDF／PNGでは全員分を出力します。")
+    W, H, _, _ = make_layout()
     svg = render_svg()
-    st.components.v1.html(svg, height=820, scrolling=True)
+    preview_height = min(max(820, int(H * 0.65)), 1200)
+    st.components.v1.html(svg, height=preview_height, scrolling=True)
 
     c1, c2 = st.columns(2)
     with c1:
@@ -1091,4 +1076,4 @@ elif menu == "出力プレビュー":
             mime="image/png"
         )
 
-st.sidebar.caption("Ver2.3：法定相続分の基本値自動入力／任意修正対応")
+st.sidebar.caption("Ver2.4：人数増加時の全表示／全出力対応")
