@@ -17,7 +17,7 @@ from PIL import Image, ImageDraw, ImageFont
 import xlsxwriter
 
 
-APP_TITLE = "相続関係説明図ジェネレーター Ver2.9"
+APP_TITLE = "相続関係説明図ジェネレーター Ver3.0"
 DB_PATH = "souzoku_cases.db"
 
 BG = "#FFF4CF"
@@ -469,14 +469,21 @@ def person_to_box(row, title, box_id, x, y, w=390, h=220, fill=BG, title_color="
 
 
 def make_layout():
+    """
+    Ver3.0 layout:
+    - 配偶者と被相続人は上下の二重線で接続
+    - 子はその二重線（中央幹線）から右へ枝分かれして、右側の縦幹線から各子へ一本線
+    - 父母は中央幹線から左へ枝分かれして、左側の縦幹線から各父母へ一本線
+    - 兄弟姉妹は被相続人下の中央幹線から一本線で接続
+    - 孫・代襲相続人は該当する子からさらに右へ一本線で接続
+    """
     parents = clean_people(st.session_state.parents_df)
     children = clean_people(st.session_state.children_df)
     siblings = clean_people(st.session_state.siblings_df)
 
     boxes, lines = [], []
-    W, box_h = 2100, 220
-    left_trunk_x = 610
-    right_trunk_x = 1655
+    # line format: ("single"|"double", [(x1,y1),(x2,y2),...])
+    box_h = 220
 
     decedent_row = {
         "氏名": st.session_state.decedent.get("氏名", ""), "続柄": "被相続人", "状態": "死亡",
@@ -487,7 +494,12 @@ def make_layout():
     decedent = person_to_box(decedent_row, "被相続人（亡くなった方）", "decedent", 760, 390, 390, box_h, "#FFFFFF", "#111111")
     boxes.append(decedent)
 
+    center_x = decedent["x"] + decedent["w"] / 2
+    dec_center_y = decedent["y"] + decedent["h"] / 2
+
+    # 配偶者：被相続人の真上。上下二重線。
     sp = st.session_state.spouse
+    spouse_bottom_y = decedent["y"] - 90
     if any(text_value(sp.get(k, "")) for k in sp):
         spouse_row = {
             "氏名": sp.get("氏名", ""), "続柄": "配偶者", "状態": sp.get("状態", ""),
@@ -495,85 +507,106 @@ def make_layout():
             "最後の本籍": sp.get("最後の本籍", ""), "住所": sp.get("住所", ""),
             "相続状況": sp.get("相続状況", ""), "相続分": sp.get("相続分", ""), "備考": sp.get("備考", ""),
         }
-        spouse = person_to_box(spouse_row, "必ず相続人　配偶者", "spouse", 760, 90, 420, box_h, BG, "#C98300")
+        spouse = person_to_box(spouse_row, "必ず相続人　配偶者", "spouse", 760, 80, 420, box_h, BG, "#C98300")
         boxes.append(spouse)
-        sx, sy = spouse["x"] + spouse["w"]/2, spouse["y"] + spouse["h"]
-        dx, dy = decedent["x"] + decedent["w"]/2, decedent["y"]
-        lines.append(("double", [(sx, sy), (dx, dy)]))
+        spouse_bottom_y = spouse["y"] + spouse["h"]
+        # ここが基準画像の「二重線」
+        lines.append(("double", [(center_x, spouse_bottom_y), (center_x, decedent["y"])]))
 
+    # 子：二重線の途中から右へ枝線、右縦幹線、各子へ一本線
+    child_boxes = []
+    child_positions = {}
+    child_x = 1450
+    child_start_y = 80
+    child_gap = 260
+    for i, row in children.iterrows():
+        relation = text_value(row.get("続柄", ""))
+        y = child_start_y + i * child_gap
+        b = person_to_box(row, "第一順位　被相続人等の子", f"child_{i}", child_x, y, 450, box_h)
+        boxes.append(b)
+        child_boxes.append(b)
+        child_positions[relation] = b
+
+    if child_boxes:
+        right_trunk_x = child_x - 70
+        child_centers = [b["y"] + b["h"] / 2 for b in child_boxes]
+        branch_y = max(spouse_bottom_y + 35, min(child_centers))
+        trunk_top = min(branch_y, min(child_centers))
+        trunk_bottom = max(branch_y, max(child_centers))
+        # 二重線の中央から右へ一本線
+        lines.append(("single", [(center_x, branch_y), (right_trunk_x, branch_y)]))
+        # 右側の縦幹線
+        lines.append(("single", [(right_trunk_x, trunk_top), (right_trunk_x, trunk_bottom)]))
+        # 各子へ一本線
+        for b in child_boxes:
+            cy = b["y"] + b["h"] / 2
+            lines.append(("single", [(right_trunk_x, cy), (b["x"], cy)]))
+
+    # 父母：中央幹線から左へ枝線、左縦幹線、各父母へ一本線
     parent_boxes = []
+    parent_x = 70
+    parent_start_y = 250
+    parent_gap = 260
     for i, row in parents.iterrows():
-        b = person_to_box(row, f"第二順位　被相続人等の{row.get('続柄','')}", f"parent_{i}", 70, 250 + i * 260, 450, box_h)
+        b = person_to_box(row, f"第二順位　被相続人等の{row.get('続柄','')}", f"parent_{i}", parent_x, parent_start_y + i * parent_gap, 450, box_h)
         boxes.append(b)
         parent_boxes.append(b)
 
     if parent_boxes:
-        min_y = min(b["y"] + b["h"]/2 for b in parent_boxes)
-        max_y = max(b["y"] + b["h"]/2 for b in parent_boxes)
-        lines.append(("single", [(left_trunk_x, min_y), (left_trunk_x, max_y)]))
+        left_trunk_x = parent_x + 520
+        parent_centers = [b["y"] + b["h"] / 2 for b in parent_boxes]
+        parent_branch_y = dec_center_y
+        trunk_top = min(parent_branch_y, min(parent_centers))
+        trunk_bottom = max(parent_branch_y, max(parent_centers))
+        # 中央幹線から左へ一本線
+        lines.append(("single", [(center_x, parent_branch_y), (left_trunk_x, parent_branch_y)]))
+        # 左側の縦幹線
+        lines.append(("single", [(left_trunk_x, trunk_top), (left_trunk_x, trunk_bottom)]))
+        # 各父母へ一本線
         for b in parent_boxes:
-            y = b["y"] + b["h"]/2
-            lines.append(("single", [(b["x"] + b["w"], y), (left_trunk_x, y)]))
-        mid_y = (min_y + max_y) / 2
-        lines.append(("single", [(left_trunk_x, mid_y), (decedent["x"], decedent["y"] + decedent["h"]/2)]))
+            py = b["y"] + b["h"] / 2
+            lines.append(("single", [(b["x"] + b["w"], py), (left_trunk_x, py)]))
 
-    child_positions = {}
-    child_boxes = []
-    for i, row in children.iterrows():
-        relation = text_value(row.get("続柄", ""))
-        y = 150 + i * 260
-        b = person_to_box(row, "第一順位　被相続人等の子", f"child_{i}", 1450, y, 450, box_h)
+    # 兄弟姉妹：被相続人の下の中央幹線から、各兄弟姉妹へ一本線
+    sibling_boxes = []
+    sibling_x = 760
+    sibling_start_y = 760
+    sibling_gap = 245
+    for i, row in siblings.iterrows():
+        b = person_to_box(row, f"第三順位　被相続人等の{row.get('続柄','兄弟姉妹')}", f"sibling_{i}", sibling_x, sibling_start_y + i * sibling_gap, 420, box_h)
         boxes.append(b)
-        child_positions[relation] = b
-        child_boxes.append(b)
+        sibling_boxes.append(b)
 
-    if child_boxes:
-        min_y = min(b["y"] + b["h"]/2 for b in child_boxes)
-        max_y = max(b["y"] + b["h"]/2 for b in child_boxes)
-        dec_y = decedent["y"] + decedent["h"]/2
-        lines.append(("single", [(right_trunk_x, min(min_y, dec_y)), (right_trunk_x, max(max_y, dec_y))]))
-        lines.append(("single", [(decedent["x"] + decedent["w"], dec_y), (right_trunk_x, dec_y)]))
-        for b in child_boxes:
-            y = b["y"] + b["h"]/2
-            lines.append(("single", [(right_trunk_x, y), (b["x"], y)]))
+    if sibling_boxes:
+        first_top_y = sibling_boxes[0]["y"]
+        last_center_y = sibling_boxes[-1]["y"] + sibling_boxes[-1]["h"] / 2
+        # 被相続人下から縦幹線を下ろす
+        lines.append(("single", [(center_x, decedent["y"] + decedent["h"]), (center_x, last_center_y)]))
+        for b in sibling_boxes:
+            sy = b["y"] + b["h"] / 2
+            # ボックス中央まで一本線。見た目は参考図の縦幹線から各箱へ接続。
+            lines.append(("single", [(center_x, sy), (b["x"] + b["w"] / 2, sy)]))
 
+    # 孫・代襲相続人：該当する子から右へ一本線
+    desc_right = child_x + 520
     for parent_relation, members in get_descendant_groups().items():
         parent_box = child_positions.get(parent_relation)
         if parent_box is None:
             continue
         for j, (_, row) in enumerate(members):
-            y = parent_box["y"] + j * 230
-            b = person_to_box(row, f"代襲相続人　被相続人等の{row.get('続柄','孫')}", f"desc_{parent_relation}_{j}", 1930, y, 390, box_h, BG_DESC, "#B86F00")
+            y = parent_box["y"] + j * 235
+            b = person_to_box(row, f"代襲相続人　被相続人等の{row.get('続柄','孫')}", f"desc_{parent_relation}_{j}", desc_right, y, 390, box_h, BG_DESC, "#B86F00")
             boxes.append(b)
-            py = parent_box["y"] + parent_box["h"]/2
-            by = b["y"] + b["h"]/2
+            py = parent_box["y"] + parent_box["h"] / 2
+            by = b["y"] + b["h"] / 2
             mid_x = parent_box["x"] + parent_box["w"] + 35
             lines.append(("single", [(parent_box["x"] + parent_box["w"], py), (mid_x, py), (mid_x, by), (b["x"], by)]))
-
-    sibling_boxes = []
-    sx, sy = 760, 760
-    for i, row in siblings.iterrows():
-        b = person_to_box(row, f"第三順位　被相続人等の{row.get('続柄','兄弟姉妹')}", f"sibling_{i}", sx, sy + i * 245, 420, box_h)
-        boxes.append(b)
-        sibling_boxes.append(b)
-
-    if sibling_boxes:
-        trunk_x = decedent["x"] + decedent["w"]/2
-        dec_bottom_y = decedent["y"] + decedent["h"]
-        first_y = sibling_boxes[0]["y"]
-        last_center_y = sibling_boxes[-1]["y"] + sibling_boxes[-1]["h"]/2
-        lines.append(("single", [(trunk_x, dec_bottom_y), (trunk_x, last_center_y)]))
-        for b in sibling_boxes:
-            y = b["y"] + b["h"]/2
-            lines.append(("single", [(trunk_x, y), (b["x"] + b["w"]/2, y)]))
 
     max_bottom = max([b["y"] + b["h"] for b in boxes] + [900])
     max_right = max([b["x"] + b["w"] for b in boxes] + [2100])
     H = max(1350, max_bottom + 170)
     W = max(2100, max_right + 80)
     return W, H, boxes, lines
-
-
 def svg_escape(s):
     return html.escape(str(s or ""))
 
@@ -1081,7 +1114,7 @@ def delete_case(case_id):
 # UI
 # =============================
 st.title(APP_TITLE)
-st.caption("相続関係説明図をPDF・PNG・Excelで出力できます。")
+st.caption("参考図のように、配偶者は上下二重線、親子・兄弟姉妹は中央幹線から一本線で接続します。")
 
 menu = st.sidebar.radio("メニュー", ["新規作成・編集", "相続人一覧・協議書", "保存データ管理", "出力プレビュー"], index=0)
 status_options = ["ご存命", "死亡", "相続放棄", "不明"]
@@ -1272,4 +1305,4 @@ elif menu == "出力プレビュー":
     with c3:
         st.download_button("関係図Excelダウンロード", data=create_diagram_excel(), file_name=f"{st.session_state.case_name or '無題案件'}_相続関係説明図.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-st.sidebar.caption("Ver2.9：Excel出力対応")
+st.sidebar.caption("Ver3.0：参考図型の線接続／Excel出力対応")
