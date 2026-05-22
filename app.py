@@ -12,12 +12,16 @@ from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.units import mm
 
 from PIL import Image, ImageDraw, ImageFont
 import xlsxwriter
 
 
-APP_TITLE = "相続関係説明図ジェネレーター Ver3.1"
+APP_TITLE = "相続関係説明図ジェネレーター Ver3.2"
 DB_PATH = "souzoku_cases.db"
 
 BG = "#FFF4CF"
@@ -1413,4 +1417,4 @@ elif menu == "出力プレビュー":
     with c3:
         st.download_button("関係図Excelダウンロード", data=create_diagram_excel(), file_name=f"{st.session_state.case_name or '無題案件'}_相続関係説明図.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-st.sidebar.caption("Ver3.1：父母婚姻二重線／兄弟姉妹接続修正")
+st.sidebar.caption("Ver3.2：PDF出力エラー修正版")

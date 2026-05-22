@@ -1,13 +1,19 @@
-# 相続関係説明図ジェネレーター Ver3.1
+# 相続関係説明図ジェネレーター Ver3.2
 
-## Ver3.1 修正点
+## Ver3.2 修正点
 
-- 被相続人等の父と母も婚姻関係として上下の二重線で接続
-- 被相続人と兄弟姉妹は、父母の婚姻二重線の途中から右へ伸びる線に接続
-- 配偶者と被相続人は上下の二重線で接続
-- 子は、配偶者・被相続人の婚姻二重線の途中から右へ伸びる線に接続
-- PDF／PNG／Excel出力にも同じ線のつながり方を反映
-- 相続人一覧・遺産分割協議書機能は継続
+- 相続人一覧PDF出力時の `NameError: getSampleStyleSheet` を修正
+- ReportLab の必要 import を app.py 冒頭へ追加
+- 相続人一覧PDF、遺産分割協議書PDF、関係図PDF、PNG、Excel出力に対応
+- Ver3.1 の父母婚姻二重線・兄弟姉妹接続レイアウトを継続
+
+## 修正対象
+
+Streamlit Cloud で表示された以下のエラーを修正しています。
+
+```text
+NameError: name 'getSampleStyleSheet' is not defined
+```
 
 ## 起動方法
 
@@ -15,3 +21,7 @@
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+## Streamlit Cloud
+
+Main file path は `app.py` です。
