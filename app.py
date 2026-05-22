@@ -12,17 +12,16 @@ from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
-from reportlab.lib.units import mm
 
 from PIL import Image, ImageDraw, ImageFont
+import xlsxwriter
 
 
-APP_TITLE = "相続関係説明図ジェネレーター Ver2.8"
+APP_TITLE = "相続関係説明図ジェネレーター Ver2.9"
 DB_PATH = "souzoku_cases.db"
+
 BG = "#FFF4CF"
+BG_DESC = "#FFF9E6"
 LINE = "#222222"
 
 PERSON_COLS = ["続柄", "氏名", "状態", "生年月日", "死亡日", "最後の本籍", "住所", "相続状況", "相続分", "備考"]
@@ -33,7 +32,7 @@ st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="e
 
 
 # =============================
-# 初期データ
+# 初期値
 # =============================
 def blank_decedent():
     return {"氏名": "", "生年月日": "", "死亡日": "", "最後の本籍": "", "最後の住所": "", "備考": ""}
@@ -196,14 +195,13 @@ def normalize_assets_df(df):
 
 
 init_db()
-
-if "app_initialized_v27" not in st.session_state:
+if "app_initialized_v29" not in st.session_state:
     reset_input_state()
-    st.session_state.app_initialized_v27 = True
+    st.session_state.app_initialized_v29 = True
 
 
 # =============================
-# 共通
+# 共通処理
 # =============================
 def text_value(v):
     return "" if v is None else str(v).strip()
@@ -282,48 +280,18 @@ def get_heirs_df():
     rows = []
     sp = st.session_state.spouse
     if has_spouse():
-        rows.append({
-            "区分": "配偶者",
-            "続柄": "配偶者",
-            "氏名": sp.get("氏名", ""),
-            "生年月日": sp.get("生年月日", ""),
-            "住所": sp.get("住所", ""),
-            "本籍": sp.get("最後の本籍", ""),
-            "相続分": sp.get("相続分", ""),
-            "相続状況": sp.get("相続状況", ""),
-            "備考": sp.get("備考", ""),
-        })
+        rows.append({"区分": "配偶者", "続柄": "配偶者", "氏名": sp.get("氏名", ""), "生年月日": sp.get("生年月日", ""), "住所": sp.get("住所", ""), "本籍": sp.get("最後の本籍", ""), "相続分": sp.get("相続分", ""), "相続状況": sp.get("相続状況", ""), "備考": sp.get("備考", "")})
 
     for label, df in [("父母", st.session_state.parents_df), ("子", st.session_state.children_df), ("兄弟姉妹", st.session_state.siblings_df)]:
         cdf = clean_people(df)
         for _, row in cdf.iterrows():
             if is_active_heir_row(row):
-                rows.append({
-                    "区分": label,
-                    "続柄": row.get("続柄", ""),
-                    "氏名": row.get("氏名", ""),
-                    "生年月日": row.get("生年月日", ""),
-                    "住所": row.get("住所", ""),
-                    "本籍": row.get("最後の本籍", ""),
-                    "相続分": row.get("相続分", ""),
-                    "相続状況": row.get("相続状況", ""),
-                    "備考": row.get("備考", ""),
-                })
+                rows.append({"区分": label, "続柄": row.get("続柄", ""), "氏名": row.get("氏名", ""), "生年月日": row.get("生年月日", ""), "住所": row.get("住所", ""), "本籍": row.get("最後の本籍", ""), "相続分": row.get("相続分", ""), "相続状況": row.get("相続状況", ""), "備考": row.get("備考", "")})
 
     ddf = clean_desc(st.session_state.descendants_df)
     for _, row in ddf.iterrows():
         if is_active_heir_row(row):
-            rows.append({
-                "区分": "代襲相続人",
-                "続柄": row.get("続柄", ""),
-                "氏名": row.get("氏名", ""),
-                "生年月日": row.get("生年月日", ""),
-                "住所": row.get("住所", ""),
-                "本籍": row.get("最後の本籍", ""),
-                "相続分": row.get("相続分", ""),
-                "相続状況": row.get("相続状況", ""),
-                "備考": f"親：{row.get('親','')}　{row.get('備考','')}",
-            })
+            rows.append({"区分": "代襲相続人", "続柄": row.get("続柄", ""), "氏名": row.get("氏名", ""), "生年月日": row.get("生年月日", ""), "住所": row.get("住所", ""), "本籍": row.get("最後の本籍", ""), "相続分": row.get("相続分", ""), "相続状況": row.get("相続状況", ""), "備考": f"親：{row.get('親','')}　{row.get('備考','')}"})
 
     return pd.DataFrame(rows, columns=["区分", "続柄", "氏名", "生年月日", "住所", "本籍", "相続分", "相続状況", "備考"])
 
@@ -463,7 +431,7 @@ def apply_default_legal_shares(overwrite=True):
 
 
 # =============================
-# 関係図描画
+# 相続関係説明図描画
 # =============================
 def calc_font_size(text, base=24, min_size=12, max_chars=7):
     t = text_value(text)
@@ -500,39 +468,25 @@ def person_to_box(row, title, box_id, x, y, w=390, h=220, fill=BG, title_color="
     }
 
 
-
 def make_layout():
-    """
-    Ver2.8:
-    参考画像に寄せた接続方式。
-    ・配偶者と被相続人は二重線
-    ・親子、兄弟姉妹、孫は一本線
-    ・親・子・兄弟姉妹は、縦幹線から枝分かれする形で表示
-    """
     parents = clean_people(st.session_state.parents_df)
     children = clean_people(st.session_state.children_df)
     siblings = clean_people(st.session_state.siblings_df)
 
-    boxes = []
-    lines = []  # (kind, [(x,y), ...]) kind: single / double
+    boxes, lines = [], []
     W, box_h = 2100, 220
+    left_trunk_x = 610
+    right_trunk_x = 1655
 
     decedent_row = {
-        "氏名": st.session_state.decedent.get("氏名", ""),
-        "続柄": "被相続人",
-        "状態": "死亡",
-        "生年月日": st.session_state.decedent.get("生年月日", ""),
-        "死亡日": st.session_state.decedent.get("死亡日", ""),
-        "最後の本籍": st.session_state.decedent.get("最後の本籍", ""),
-        "住所": st.session_state.decedent.get("最後の住所", ""),
-        "相続状況": "",
-        "相続分": "",
-        "備考": st.session_state.decedent.get("備考", ""),
+        "氏名": st.session_state.decedent.get("氏名", ""), "続柄": "被相続人", "状態": "死亡",
+        "生年月日": st.session_state.decedent.get("生年月日", ""), "死亡日": st.session_state.decedent.get("死亡日", ""),
+        "最後の本籍": st.session_state.decedent.get("最後の本籍", ""), "住所": st.session_state.decedent.get("最後の住所", ""),
+        "相続状況": "", "相続分": "", "備考": st.session_state.decedent.get("備考", ""),
     }
-    decedent = person_to_box(decedent_row, "被相続人（亡くなった方）", "decedent", 780, 390, 390, box_h, "#FFFFFF", "#111111")
+    decedent = person_to_box(decedent_row, "被相続人（亡くなった方）", "decedent", 760, 390, 390, box_h, "#FFFFFF", "#111111")
     boxes.append(decedent)
 
-    # 配偶者：被相続人と二重線で縦接続
     sp = st.session_state.spouse
     if any(text_value(sp.get(k, "")) for k in sp):
         spouse_row = {
@@ -541,11 +495,12 @@ def make_layout():
             "最後の本籍": sp.get("最後の本籍", ""), "住所": sp.get("住所", ""),
             "相続状況": sp.get("相続状況", ""), "相続分": sp.get("相続分", ""), "備考": sp.get("備考", ""),
         }
-        spouse = person_to_box(spouse_row, "必ず相続人　配偶者", "spouse", 780, 90, 420, box_h, BG, "#C98300")
+        spouse = person_to_box(spouse_row, "必ず相続人　配偶者", "spouse", 760, 90, 420, box_h, BG, "#C98300")
         boxes.append(spouse)
-        lines.append(("double", [(spouse["x"] + spouse["w"] / 2, spouse["y"] + spouse["h"]), (decedent["x"] + decedent["w"] / 2, decedent["y"])]))
+        sx, sy = spouse["x"] + spouse["w"]/2, spouse["y"] + spouse["h"]
+        dx, dy = decedent["x"] + decedent["w"]/2, decedent["y"]
+        lines.append(("double", [(sx, sy), (dx, dy)]))
 
-    # 父母：左側、縦幹線＋枝線
     parent_boxes = []
     for i, row in parents.iterrows():
         b = person_to_box(row, f"第二順位　被相続人等の{row.get('続柄','')}", f"parent_{i}", 70, 250 + i * 260, 450, box_h)
@@ -553,68 +508,64 @@ def make_layout():
         parent_boxes.append(b)
 
     if parent_boxes:
-        left_trunk_x = 610
-        min_y = min(b["y"] + b["h"] / 2 for b in parent_boxes)
-        max_y = max(b["y"] + b["h"] / 2 for b in parent_boxes)
+        min_y = min(b["y"] + b["h"]/2 for b in parent_boxes)
+        max_y = max(b["y"] + b["h"]/2 for b in parent_boxes)
         lines.append(("single", [(left_trunk_x, min_y), (left_trunk_x, max_y)]))
         for b in parent_boxes:
-            cy = b["y"] + b["h"] / 2
-            lines.append(("single", [(b["x"] + b["w"], cy), (left_trunk_x, cy)]))
+            y = b["y"] + b["h"]/2
+            lines.append(("single", [(b["x"] + b["w"], y), (left_trunk_x, y)]))
         mid_y = (min_y + max_y) / 2
-        lines.append(("single", [(left_trunk_x, mid_y), (decedent["x"], decedent["y"] + decedent["h"] / 2)]))
+        lines.append(("single", [(left_trunk_x, mid_y), (decedent["x"], decedent["y"] + decedent["h"]/2)]))
 
-    # 子：右側、被相続人から右縦幹線へ、そこから各子へ一本線
     child_positions = {}
     child_boxes = []
     for i, row in children.iterrows():
         relation = text_value(row.get("続柄", ""))
         y = 150 + i * 260
-        b = person_to_box(row, "第一順位　被相続人等の子", f"child_{i}", 1460, y, 450, box_h)
+        b = person_to_box(row, "第一順位　被相続人等の子", f"child_{i}", 1450, y, 450, box_h)
         boxes.append(b)
         child_positions[relation] = b
         child_boxes.append(b)
 
     if child_boxes:
-        right_trunk_x = 1370
-        dec_y = decedent["y"] + decedent["h"] / 2
-        min_y = min([b["y"] + b["h"] / 2 for b in child_boxes] + [dec_y])
-        max_y = max([b["y"] + b["h"] / 2 for b in child_boxes] + [dec_y])
-        lines.append(("single", [(right_trunk_x, min_y), (right_trunk_x, max_y)]))
+        min_y = min(b["y"] + b["h"]/2 for b in child_boxes)
+        max_y = max(b["y"] + b["h"]/2 for b in child_boxes)
+        dec_y = decedent["y"] + decedent["h"]/2
+        lines.append(("single", [(right_trunk_x, min(min_y, dec_y)), (right_trunk_x, max(max_y, dec_y))]))
         lines.append(("single", [(decedent["x"] + decedent["w"], dec_y), (right_trunk_x, dec_y)]))
         for b in child_boxes:
-            cy = b["y"] + b["h"] / 2
-            lines.append(("single", [(right_trunk_x, cy), (b["x"], cy)]))
+            y = b["y"] + b["h"]/2
+            lines.append(("single", [(right_trunk_x, y), (b["x"], y)]))
 
-    # 孫・代襲相続人：該当する子から一本線で右側へ
     for parent_relation, members in get_descendant_groups().items():
         parent_box = child_positions.get(parent_relation)
         if parent_box is None:
             continue
-        branch_x = parent_box["x"] + parent_box["w"] + 35
         for j, (_, row) in enumerate(members):
-            y = parent_box["y"] + j * 235
-            b = person_to_box(row, f"代襲相続人　被相続人等の{row.get('続柄','孫')}", f"desc_{parent_relation}_{j}", 1950, y, 390, box_h, "#FFF9E6", "#B86F00")
+            y = parent_box["y"] + j * 230
+            b = person_to_box(row, f"代襲相続人　被相続人等の{row.get('続柄','孫')}", f"desc_{parent_relation}_{j}", 1930, y, 390, box_h, BG_DESC, "#B86F00")
             boxes.append(b)
-            py = parent_box["y"] + parent_box["h"] / 2
-            by = b["y"] + b["h"] / 2
-            lines.append(("single", [(parent_box["x"] + parent_box["w"], py), (branch_x, py), (branch_x, by), (b["x"], by)]))
+            py = parent_box["y"] + parent_box["h"]/2
+            by = b["y"] + b["h"]/2
+            mid_x = parent_box["x"] + parent_box["w"] + 35
+            lines.append(("single", [(parent_box["x"] + parent_box["w"], py), (mid_x, py), (mid_x, by), (b["x"], by)]))
 
-    # 兄弟姉妹：中央下、縦幹線＋枝線
     sibling_boxes = []
+    sx, sy = 760, 760
     for i, row in siblings.iterrows():
-        b = person_to_box(row, f"第三順位　被相続人等の{row.get('続柄','兄弟姉妹')}", f"sibling_{i}", 780, 760 + i * 245, 420, box_h)
+        b = person_to_box(row, f"第三順位　被相続人等の{row.get('続柄','兄弟姉妹')}", f"sibling_{i}", sx, sy + i * 245, 420, box_h)
         boxes.append(b)
         sibling_boxes.append(b)
 
     if sibling_boxes:
-        trunk_x = decedent["x"] + decedent["w"] / 2
-        top_y = decedent["y"] + decedent["h"]
-        first_y = sibling_boxes[0]["y"] + sibling_boxes[0]["h"] / 2
-        last_y = sibling_boxes[-1]["y"] + sibling_boxes[-1]["h"] / 2
-        lines.append(("single", [(trunk_x, top_y), (trunk_x, last_y)]))
+        trunk_x = decedent["x"] + decedent["w"]/2
+        dec_bottom_y = decedent["y"] + decedent["h"]
+        first_y = sibling_boxes[0]["y"]
+        last_center_y = sibling_boxes[-1]["y"] + sibling_boxes[-1]["h"]/2
+        lines.append(("single", [(trunk_x, dec_bottom_y), (trunk_x, last_center_y)]))
         for b in sibling_boxes:
-            cy = b["y"] + b["h"] / 2
-            lines.append(("single", [(trunk_x, cy), (b["x"] + b["w"] / 2, cy)]))
+            y = b["y"] + b["h"]/2
+            lines.append(("single", [(trunk_x, y), (b["x"] + b["w"]/2, y)]))
 
     max_bottom = max([b["y"] + b["h"] for b in boxes] + [900])
     max_right = max([b["x"] + b["w"] for b in boxes] + [2100])
@@ -627,17 +578,6 @@ def svg_escape(s):
     return html.escape(str(s or ""))
 
 
-def line_svg(kind, pts):
-    if len(pts) < 2:
-        return ""
-    if kind == "double":
-        pts1 = " ".join([f"{x-5},{y}" for x, y in pts])
-        pts2 = " ".join([f"{x+5},{y}" for x, y in pts])
-        return f'<polyline points="{pts1}" fill="none" stroke="{LINE}" stroke-width="3"/><polyline points="{pts2}" fill="none" stroke="{LINE}" stroke-width="3"/>'
-    pts_s = " ".join([f"{x},{y}" for x, y in pts])
-    return f'<polyline points="{pts_s}" fill="none" stroke="{LINE}" stroke-width="3"/>'
-
-
 def render_svg():
     W, H, boxes, lines = make_layout()
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">']
@@ -646,7 +586,15 @@ def render_svg():
     parts.append('<text x="48" y="61" font-size="34" font-weight="700" font-family="sans-serif">相続関係説明図</text>')
 
     for kind, pts in lines:
-        parts.append(line_svg(kind, pts))
+        if len(pts) < 2:
+            continue
+        if kind == "double":
+            for off in [-5, 5]:
+                shifted = " ".join([f"{x+off},{y}" for x, y in pts])
+                parts.append(f'<polyline points="{shifted}" fill="none" stroke="{LINE}" stroke-width="3"/>')
+        else:
+            point_text = " ".join([f"{x},{y}" for x, y in pts])
+            parts.append(f'<polyline points="{point_text}" fill="none" stroke="{LINE}" stroke-width="3"/>')
 
     for b in boxes:
         x, y, w, h = b["x"], b["y"], b["w"], b["h"]
@@ -655,6 +603,7 @@ def render_svg():
         parts.append(f'<text x="{x+16}" y="{y+34}" font-size="23" fill="{b["title_color"]}" font-weight="700" font-family="sans-serif">{svg_escape(b["title"])}</text>')
         for idx, line in enumerate(split_name_lines(b.get("name", ""), 8)[:2]):
             parts.append(f'<text x="{x+16}" y="{y+70 + idx*(name_size+4)}" font-size="{name_size}" fill="#111" font-weight="700" font-family="sans-serif">{svg_escape(line)}</text>')
+
         rows = [f"続柄：{b.get('relation','')}", f"生年月日：{b.get('birth','')}", make_status_line(b.get("status", ""), b.get("death", ""))]
         if text_value(b.get("inheritance_status", "")) or text_value(b.get("share", "")):
             rows.append(f"遺産分割：{b.get('inheritance_status','')}　相続分：{b.get('share','')}")
@@ -662,6 +611,7 @@ def render_svg():
             rows += split_text_lines(f"本籍：{b.get('honseki','')}", 22, 1)
         if text_value(b.get("address", "")):
             rows += split_text_lines(f"住所：{b.get('address','')}", 22, 1)
+
         line_y = y + 118
         for row in rows:
             parts.append(f'<text x="{x+16}" y="{line_y}" font-size="17" fill="#111" font-family="sans-serif">{svg_escape(row)}</text>')
@@ -672,8 +622,75 @@ def render_svg():
     parts.append(f'<text x="{footer_x}" y="{footer_y}" font-size="18" fill="#111" font-family="sans-serif">作成日：{svg_escape(creator.get("作成日",""))}</text>')
     parts.append(f'<text x="{footer_x}" y="{footer_y+28}" font-size="18" fill="#111" font-family="sans-serif">作成者：{svg_escape(creator.get("作成者氏名",""))}</text>')
     parts.append(f'<text x="{footer_x}" y="{footer_y+56}" font-size="18" fill="#111" font-family="sans-serif">住所：{svg_escape(creator.get("作成者住所",""))}</text>')
-    parts.append('</svg>')
+    parts.append("</svg>")
     return "\n".join(parts)
+
+
+def find_jp_font(size=24):
+    candidates = [
+        "C:/Windows/Fonts/meiryo.ttc",
+        "C:/Windows/Fonts/YuGothM.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+        "/System/Library/Fonts/AppleGothic.ttf",
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return ImageFont.truetype(p, size)
+    return ImageFont.load_default()
+
+
+def create_png():
+    W, H, boxes, lines = make_layout()
+    img = Image.new("RGB", (W, H), "white")
+    draw = ImageDraw.Draw(img)
+    font_title = find_jp_font(34)
+    font_box_title = find_jp_font(23)
+    font_small = find_jp_font(17)
+
+    draw.rectangle([35, 20, 375, 80], outline="black", width=4)
+    draw.text((48, 30), "相続関係説明図", fill="black", font=font_title)
+
+    for kind, pts in lines:
+        if len(pts) < 2:
+            continue
+        if kind == "double":
+            for off in [-5, 5]:
+                p0 = pts[0]
+                for p1 in pts[1:]:
+                    draw.line([p0[0] + off, p0[1], p1[0] + off, p1[1]], fill=LINE, width=3)
+                    p0 = p1
+        else:
+            p0 = pts[0]
+            for p1 in pts[1:]:
+                draw.line([p0[0], p0[1], p1[0], p1[1]], fill=LINE, width=3)
+                p0 = p1
+
+    for b in boxes:
+        x, y, w, h = b["x"], b["y"], b["w"], b["h"]
+        draw.rectangle([x, y, x+w, y+h], fill=b["fill"], outline=LINE, width=3)
+        draw.text((x+16, y+14), str(b["title"] or ""), fill=b["title_color"], font=font_box_title)
+        name_size = calc_font_size(b.get("name", ""), 25, 15, 7)
+        font_name = find_jp_font(name_size)
+        for idx, line in enumerate(split_name_lines(b.get("name", ""), 8)[:2]):
+            draw.text((x+16, y+52 + idx*(name_size+5)), line, fill="black", font=font_name)
+        line_y = y + 110
+        rows = [f"続柄：{b.get('relation','')}", f"生年月日：{b.get('birth','')}", make_status_line(b.get("status", ""), b.get("death", ""))]
+        if text_value(b.get("inheritance_status", "")) or text_value(b.get("share", "")):
+            rows.append(f"遺産分割：{b.get('inheritance_status','')}　相続分：{b.get('share','')}")
+        for row in rows:
+            draw.text((x+16, line_y), row, fill="black", font=font_small)
+            line_y += 24
+
+    creator = st.session_state.creator
+    draw.text((1280, H-90), f"作成日：{creator.get('作成日','')}", fill="black", font=font_small)
+    draw.text((1280, H-62), f"作成者：{creator.get('作成者氏名','')}", fill="black", font=font_small)
+    draw.text((1280, H-34), f"住所：{creator.get('作成者住所','')}", fill="black", font=font_small)
+
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
 
 
 def create_diagram_pdf():
@@ -698,13 +715,16 @@ def create_diagram_pdf():
         if len(pts) < 2:
             continue
         transformed = [(tx(x), ty(y)) for x, y in pts]
-        c.setStrokeColor(colors.black)
-        c.setLineWidth(max(0.4, 0.8 * scale))
-        offsets = [-2 * scale, 2 * scale] if kind == "double" else [0]
-        for off in offsets:
+        if kind == "double":
+            for off in [-2*scale, 2*scale]:
+                p0 = transformed[0]
+                for p1 in transformed[1:]:
+                    c.line(p0[0] + off, p0[1], p1[0] + off, p1[1])
+                    p0 = p1
+        else:
             p0 = transformed[0]
             for p1 in transformed[1:]:
-                c.line(p0[0] + off, p0[1], p1[0] + off, p1[1])
+                c.line(p0[0], p0[1], p1[0], p1[1])
                 p0 = p1
 
     for b in boxes:
@@ -730,63 +750,101 @@ def create_diagram_pdf():
             c.drawString(x + 7*scale, current_y, row)
             current_y -= 9.2*scale
 
-    creator = st.session_state.creator
-    c.setFont("HeiseiKakuGo-W5", max(5, 8 * scale))
-    c.drawString(tx(1280), ty(H - 40), f"作成日：{creator.get('作成日','')}　作成者：{creator.get('作成者氏名','')}　住所：{creator.get('作成者住所','')}")
     c.showPage()
     c.save()
     buffer.seek(0)
     return buffer.getvalue()
 
 
-def find_jp_font(size=24):
-    candidates = ["C:/Windows/Fonts/meiryo.ttc", "C:/Windows/Fonts/YuGothM.ttc", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc", "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc", "/System/Library/Fonts/AppleGothic.ttf"]
-    for p in candidates:
-        if os.path.exists(p):
-            return ImageFont.truetype(p, size)
-    return ImageFont.load_default()
+# =============================
+# Excel出力
+# =============================
+def write_df_to_worksheet(workbook, worksheet, df, start_row=0, start_col=0):
+    header_fmt = workbook.add_format({"bold": True, "bg_color": "#EDE7E3", "border": 1, "align": "center", "valign": "vcenter"})
+    cell_fmt = workbook.add_format({"border": 1, "valign": "top", "text_wrap": True})
+    for c, col in enumerate(df.columns):
+        worksheet.write(start_row, start_col + c, col, header_fmt)
+    for r, (_, row) in enumerate(df.iterrows(), start_row + 1):
+        for c, col in enumerate(df.columns):
+            worksheet.write(r, start_col + c, row.get(col, ""), cell_fmt)
 
 
-def create_png():
-    W, H, boxes, lines = make_layout()
-    img = Image.new("RGB", (W, H), "white")
-    draw = ImageDraw.Draw(img)
-    font_title, font_box_title, font_small = find_jp_font(34), find_jp_font(23), find_jp_font(17)
-    draw.rectangle([35, 20, 375, 80], outline="black", width=4)
-    draw.text((48, 30), "相続関係説明図", fill="black", font=font_title)
+def create_diagram_excel():
+    output = io.BytesIO()
+    workbook = xlsxwriter.Workbook(output, {"in_memory": True})
 
-    for kind, pts in lines:
-        if len(pts) < 2:
-            continue
-        offsets = [-5, 5] if kind == "double" else [0]
-        for off in offsets:
-            p0 = pts[0]
-            for p1 in pts[1:]:
-                draw.line([p0[0] + off, p0[1], p1[0] + off, p1[1]], fill=LINE, width=3)
-                p0 = p1
+    # 相続関係説明図シート：PNGを貼り付け
+    ws = workbook.add_worksheet("相続関係説明図")
+    ws.set_landscape()
+    ws.set_paper(9)  # A4
+    ws.fit_to_pages(1, 1)
+    ws.set_margins(0.25, 0.25, 0.25, 0.25)
+    ws.hide_gridlines(2)
+    for col in range(0, 20):
+        ws.set_column(col, col, 12)
+    for row in range(0, 60):
+        ws.set_row(row, 22)
 
-    for b in boxes:
-        x, y, w, h = b["x"], b["y"], b["w"], b["h"]
-        draw.rectangle([x, y, x+w, y+h], fill=b["fill"], outline=LINE, width=3)
-        draw.text((x+16, y+14), str(b["title"] or ""), fill=b["title_color"], font=font_box_title)
-        name_size = calc_font_size(b.get("name", ""), 25, 15, 7)
-        font_name = find_jp_font(name_size)
-        for idx, line in enumerate(split_name_lines(b.get("name", ""), 8)[:2]):
-            draw.text((x+16, y+52 + idx*(name_size+5)), line, fill="black", font=font_name)
-        line_y = y + 110
-        rows = [f"続柄：{b.get('relation','')}", f"生年月日：{b.get('birth','')}", make_status_line(b.get("status", ""), b.get("death", ""))]
-        if text_value(b.get("inheritance_status", "")) or text_value(b.get("share", "")):
-            rows.append(f"遺産分割：{b.get('inheritance_status','')}　相続分：{b.get('share','')}")
-        for row in rows:
-            draw.text((x+16, line_y), row, fill="black", font=font_small)
-            line_y += 24
-    out = io.BytesIO()
-    img.save(out, format="PNG")
-    return out.getvalue()
+    png_bytes = create_png()
+    image_stream = io.BytesIO(png_bytes)
+
+    W, H, _, _ = make_layout()
+    # A4横に収まりやすい比率で貼付
+    x_scale = 0.47 if W >= 2100 else 0.55
+    y_scale = x_scale
+    ws.insert_image("B2", "souzoku_diagram.png", {"image_data": image_stream, "x_scale": x_scale, "y_scale": y_scale})
+
+    # 相続人一覧
+    ws_heirs = workbook.add_worksheet("相続人一覧")
+    heirs_df = get_heirs_df()
+    if heirs_df.empty:
+        heirs_df = pd.DataFrame(columns=["区分", "続柄", "氏名", "生年月日", "住所", "本籍", "相続分", "相続状況", "備考"])
+    write_df_to_worksheet(workbook, ws_heirs, heirs_df)
+    ws_heirs.set_column(0, 0, 14)
+    ws_heirs.set_column(1, 2, 16)
+    ws_heirs.set_column(3, 3, 18)
+    ws_heirs.set_column(4, 5, 35)
+    ws_heirs.set_column(6, 8, 16)
+
+    # 被相続人情報
+    ws_info = workbook.add_worksheet("被相続人情報")
+    info = [
+        ["氏名", st.session_state.decedent.get("氏名", "")],
+        ["生年月日", st.session_state.decedent.get("生年月日", "")],
+        ["死亡日", st.session_state.decedent.get("死亡日", "")],
+        ["最後の本籍", st.session_state.decedent.get("最後の本籍", "")],
+        ["最後の住所", st.session_state.decedent.get("最後の住所", "")],
+        ["備考", st.session_state.decedent.get("備考", "")],
+        ["作成日", st.session_state.creator.get("作成日", "")],
+        ["作成者氏名", st.session_state.creator.get("作成者氏名", "")],
+        ["作成者住所", st.session_state.creator.get("作成者住所", "")],
+    ]
+    key_fmt = workbook.add_format({"bold": True, "bg_color": "#EDE7E3", "border": 1})
+    val_fmt = workbook.add_format({"border": 1, "text_wrap": True})
+    for r, (k, v) in enumerate(info):
+        ws_info.write(r, 0, k, key_fmt)
+        ws_info.write(r, 1, v, val_fmt)
+    ws_info.set_column(0, 0, 18)
+    ws_info.set_column(1, 1, 60)
+
+    # 財産一覧
+    ws_assets = workbook.add_worksheet("財産一覧")
+    assets_df = clean_assets(st.session_state.assets_df)
+    if assets_df.empty:
+        assets_df = pd.DataFrame(columns=ASSET_COLS)
+    write_df_to_worksheet(workbook, ws_assets, assets_df)
+    ws_assets.set_column(0, 0, 16)
+    ws_assets.set_column(1, 1, 18)
+    ws_assets.set_column(2, 2, 70)
+    ws_assets.set_column(3, 3, 30)
+
+    workbook.close()
+    output.seek(0)
+    return output.getvalue()
 
 
 # =============================
-# PDF：相続人一覧・遺産分割協議書
+# PDF：相続人一覧・協議書
 # =============================
 def jp_styles():
     pdfmetrics.registerFont(UnicodeCIDFont("HeiseiKakuGo-W5"))
@@ -803,11 +861,14 @@ def p(text, style):
 
 
 def create_heir_list_pdf():
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=15*mm, leftMargin=15*mm, topMargin=15*mm, bottomMargin=15*mm)
     styles = jp_styles()
     story = [Paragraph("相続人一覧", styles["JPTitle"])]
-
     d = st.session_state.decedent
     story += [
         Paragraph("被相続人", styles["JPHeading"]),
@@ -816,7 +877,6 @@ def create_heir_list_pdf():
         p(f"最後の住所：{d.get('最後の住所','')}", styles["JPBody"]),
         Spacer(1, 8),
     ]
-
     heirs = get_heirs_df()
     if heirs.empty:
         story.append(p("相続人として抽出できる入力がありません。", styles["JPBody"]))
@@ -834,18 +894,26 @@ def create_heir_list_pdf():
         ]))
         story.append(table)
 
-    story += [Spacer(1, 14), p(f"作成日：{st.session_state.creator.get('作成日','')}", styles["JPBody"]), p(f"作成者：{st.session_state.creator.get('作成者氏名','')}", styles["JPBody"]), p(f"住所：{st.session_state.creator.get('作成者住所','')}", styles["JPBody"])]
+    story += [
+        Spacer(1, 14),
+        p(f"作成日：{st.session_state.creator.get('作成日','')}", styles["JPBody"]),
+        p(f"作成者：{st.session_state.creator.get('作成者氏名','')}", styles["JPBody"]),
+        p(f"住所：{st.session_state.creator.get('作成者住所','')}", styles["JPBody"]),
+    ]
     doc.build(story)
     buffer.seek(0)
     return buffer.getvalue()
 
 
 def create_agreement_pdf():
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=18*mm, leftMargin=18*mm, topMargin=16*mm, bottomMargin=16*mm)
     styles = jp_styles()
     story = [Paragraph("遺産分割協議書", styles["JPTitle"])]
-
     d = st.session_state.decedent
     story += [
         Paragraph("1　被相続人", styles["JPHeading"]),
@@ -858,7 +926,6 @@ def create_agreement_pdf():
         Spacer(1, 8),
         Paragraph("2　各財産の分割内容", styles["JPHeading"]),
     ]
-
     assets = clean_assets(st.session_state.assets_df)
     if assets.empty:
         story.append(p("（財産の分割内容をここに記載する。）", styles["JPBody"]))
@@ -870,7 +937,6 @@ def create_agreement_pdf():
             if text_value(r.get("備考", "")):
                 story.append(p(f"備考：{r.get('備考','')}", styles["JPBody"]))
             story.append(Spacer(1, 6))
-
     ag = st.session_state.agreement
     story += [
         Paragraph("3　債務の承継", styles["JPHeading"]),
@@ -884,18 +950,12 @@ def create_agreement_pdf():
         Spacer(1, 14),
         Paragraph("相続人署名押印欄", styles["JPHeading"]),
     ]
-
     heirs = get_heirs_df()
     if heirs.empty:
         story.append(p("相続人：　　　　　　　　　　　　　　　実印", styles["JPBody"]))
     else:
         for _, r in heirs.iterrows():
-            story += [
-                Spacer(1, 8),
-                p(f"住所：{r.get('住所','')}", styles["JPBody"]),
-                p(f"氏名：{r.get('氏名','')}　　　　　　　　　　　　　　　実印", styles["JPBody"]),
-            ]
-
+            story += [Spacer(1, 8), p(f"住所：{r.get('住所','')}", styles["JPBody"]), p(f"氏名：{r.get('氏名','')}　　　　　　　　　　　　　　　実印", styles["JPBody"])]
     story += [Spacer(1, 8), p("※複数ページとなる場合は、各ページに契印（割印）を行うことを想定してください。", styles["JPSmall"])]
     doc.build(story)
     buffer.seek(0)
@@ -903,7 +963,7 @@ def create_agreement_pdf():
 
 
 # =============================
-# SQLite 操作
+# SQLite保存・読込
 # =============================
 def save_case(case_name):
     name = text_value(case_name) or "無題案件"
@@ -1021,7 +1081,7 @@ def delete_case(case_id):
 # UI
 # =============================
 st.title(APP_TITLE)
-st.caption("配偶者は二重線、親子・兄弟姉妹は一本線。参考画像に近い接続方式です。")
+st.caption("相続関係説明図をPDF・PNG・Excelで出力できます。")
 
 menu = st.sidebar.radio("メニュー", ["新規作成・編集", "相続人一覧・協議書", "保存データ管理", "出力プレビュー"], index=0)
 status_options = ["ご存命", "死亡", "相続放棄", "不明"]
@@ -1120,7 +1180,7 @@ if menu == "新規作成・編集":
         st.session_state.creator["作成者住所"] = st.text_input("作成者住所", st.session_state.creator.get("作成者住所", ""))
 
     st.divider()
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         if st.button("新規保存", type="primary"):
             save_case(st.session_state.case_name)
@@ -1133,33 +1193,25 @@ if menu == "新規作成・編集":
         st.download_button("関係図PDF", data=create_diagram_pdf(), file_name=f"{st.session_state.case_name or '無題案件'}_相続関係説明図.pdf", mime="application/pdf")
     with c4:
         st.download_button("関係図PNG", data=create_png(), file_name=f"{st.session_state.case_name or '無題案件'}_相続関係説明図.png", mime="image/png")
+    with c5:
+        st.download_button("関係図Excel", data=create_diagram_excel(), file_name=f"{st.session_state.case_name or '無題案件'}_相続関係説明図.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 elif menu == "相続人一覧・協議書":
     st.subheader("相続人一覧")
     heirs = get_heirs_df()
     st.dataframe(heirs, use_container_width=True, hide_index=True)
-
     st.download_button("相続人一覧PDFを出力", data=create_heir_list_pdf(), file_name=f"{st.session_state.case_name or '無題案件'}_相続人一覧.pdf", mime="application/pdf")
+    st.download_button("相続関係一式Excelを出力", data=create_diagram_excel(), file_name=f"{st.session_state.case_name or '無題案件'}_相続関係一式.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     st.divider()
     st.subheader("遺産分割協議書 作成")
     st.caption("財産の特定事項は、登記簿謄本・通帳・証券会社資料・車検証等の記載に合わせて入力してください。")
-
-    st.markdown("#### 財産の分割内容")
     heir_names = [""] + get_heirs_df()["氏名"].dropna().astype(str).tolist()
     st.session_state.assets_df = st.data_editor(
-        normalize_assets_df(st.session_state.assets_df),
-        num_rows="dynamic",
-        use_container_width=True,
-        key="assets_editor",
-        column_config={
-            "種類": st.column_config.SelectboxColumn("種類", options=["不動産", "預貯金", "有価証券・株式", "自動車", "動産", "ゴルフ会員権", "その他"]),
-            "取得者": st.column_config.SelectboxColumn("取得者", options=heir_names),
-            "内容・特定事項": st.column_config.TextColumn("内容・特定事項", width="large"),
-        }
+        normalize_assets_df(st.session_state.assets_df), num_rows="dynamic", use_container_width=True, key="assets_editor",
+        column_config={"種類": st.column_config.SelectboxColumn("種類", options=["不動産", "預貯金", "有価証券・株式", "自動車", "動産", "ゴルフ会員権", "その他"]), "取得者": st.column_config.SelectboxColumn("取得者", options=heir_names), "内容・特定事項": st.column_config.TextColumn("内容・特定事項", width="large")}
     )
 
-    st.markdown("#### 協議書条項")
     c1, c2 = st.columns(2)
     with c1:
         st.session_state.agreement["協議成立日"] = st.text_input("作成年月日・協議成立日", st.session_state.agreement.get("協議成立日", datetime.now().strftime("%Y-%m-%d")))
@@ -1167,16 +1219,10 @@ elif menu == "相続人一覧・協議書":
     with c2:
         st.session_state.agreement["後日発見財産"] = st.text_area("後日発見された財産の取扱い", st.session_state.agreement.get("後日発見財産", ""), height=100)
         st.session_state.agreement["その他条項"] = st.text_area("その他条項", st.session_state.agreement.get("その他条項", ""), height=100)
-
     st.download_button("遺産分割協議書PDFを出力", data=create_agreement_pdf(), file_name=f"{st.session_state.case_name or '無題案件'}_遺産分割協議書.pdf", mime="application/pdf")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("協議書情報を保存"):
-            update_case(st.session_state.get("case_id"), st.session_state.case_name)
-            st.success("保存しました。")
-    with c2:
-        st.info("署名押印欄は、相続人一覧から自動作成します。住所は印鑑証明書と一致させてください。")
+    if st.button("協議書情報を保存"):
+        update_case(st.session_state.get("case_id"), st.session_state.case_name)
+        st.success("保存しました。")
 
 elif menu == "保存データ管理":
     st.subheader("保存データ管理")
@@ -1218,10 +1264,12 @@ elif menu == "出力プレビュー":
     st.subheader("出力プレビュー")
     W, H, _, _ = make_layout()
     st.components.v1.html(render_svg(), height=min(max(820, int(H * 0.65)), 1200), scrolling=True)
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         st.download_button("関係図PDFダウンロード", data=create_diagram_pdf(), file_name=f"{st.session_state.case_name or '無題案件'}_相続関係説明図.pdf", mime="application/pdf")
     with c2:
         st.download_button("関係図PNGダウンロード", data=create_png(), file_name=f"{st.session_state.case_name or '無題案件'}_相続関係説明図.png", mime="image/png")
+    with c3:
+        st.download_button("関係図Excelダウンロード", data=create_diagram_excel(), file_name=f"{st.session_state.case_name or '無題案件'}_相続関係説明図.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-st.sidebar.caption("Ver2.8：参考図寄せ／二重線・一本線接続修正")
+st.sidebar.caption("Ver2.9：Excel出力対応")
